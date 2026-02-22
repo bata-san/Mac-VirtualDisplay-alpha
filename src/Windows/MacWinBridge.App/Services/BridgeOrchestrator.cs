@@ -25,6 +25,9 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
     private BridgeTransport? _videoTransport;
     private BridgeTransport? _audioTransport;
 
+    // Input hook (owned here; shared with KvmService)
+    private GlobalInputHook? _inputHook;
+
     // Services
     public DisplaySwitchService? DisplayService { get; private set; }
     public AudioStreamService? AudioService { get; private set; }
@@ -69,7 +72,7 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
         {
             var discovery = new BridgeDiscovery(
                 _loggerFactory.CreateLogger<BridgeDiscovery>());
-            var macIp = await discovery.DiscoverMacAsync(TimeSpan.FromSeconds(10), ct);
+            var macIp = await discovery.DiscoverMacAsync(TimeSpan.FromSeconds(10), ct: ct);
             if (macIp is null)
             {
                 StatusMessage?.Invoke(this, "Macが見つかりません。IPアドレスを手動設定してください。");
@@ -111,13 +114,14 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
 
             KvmService = new SmartKvmService(
                 _loggerFactory.CreateLogger<SmartKvmService>(),
-                _config, _controlTransport);
+                _config, _controlTransport,
+                _inputHook ??= new GlobalInputHook(_loggerFactory.CreateLogger<GlobalInputHook>()));
 
             // Start audio streaming (always active for unified audio)
             await AudioService.StartAsync();
 
             // Start KVM service
-            KvmService.Start();
+            KvmService.Start(_config.Input.MacDisplayWidth, _config.Input.MacDisplayHeight);
 
             IsConnected = true;
             ConnectedMacName = macHost;
@@ -192,7 +196,8 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
         _statsTimer = null;
 
         KvmService?.Stop();
-        KvmService?.Dispose();
+        if (KvmService is not null)
+            await KvmService.DisposeAsync();
         KvmService = null;
 
         AudioService?.Stop();

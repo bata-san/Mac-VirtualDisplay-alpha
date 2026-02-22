@@ -68,8 +68,8 @@ public sealed class FullScreenRenderer : IDisposable
 
         var desc = new SwapChainDescription1
         {
-            Width       = (uint)_targetWidth,
-            Height      = (uint)_targetHeight,
+            Width       = _targetWidth,
+            Height      = _targetHeight,
             Format      = Format.B8G8R8A8_UNorm,
             Stereo      = false,
             SampleDescription = new SampleDescription(1, 0),

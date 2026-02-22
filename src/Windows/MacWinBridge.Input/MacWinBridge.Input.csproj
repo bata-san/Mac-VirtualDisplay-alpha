@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MacWinBridge.Core\MacWinBridge.Core.csproj" />
+    <ProjectReference Include="..\MacWinBridge.Display\MacWinBridge.Display.csproj" />
   </ItemGroup>
 
 </Project>

@@ -23,7 +23,6 @@ public sealed class H264Decoder : IDisposable
     private ID3D11DeviceContext?  _context;
     private IMFTransform?        _decoder;
     private IMFDXGIDeviceManager? _dxgiManager;
-    private uint                 _resetToken;
 
     private int _width;
     private int _height;
@@ -53,8 +52,8 @@ public sealed class H264Decoder : IDisposable
         _height  = height;
 
         // Create DXGI Device Manager for hardware-accelerated decoding
-        MediaFactory.MFCreateDXGIDeviceManager(out _resetToken, out _dxgiManager);
-        _dxgiManager.ResetDevice(device, _resetToken);
+        _dxgiManager = MediaFactory.MFCreateDXGIDeviceManager();
+        _dxgiManager!.ResetDevice(device);
 
         // Find and create H.264 decoder MFT
         CreateDecoderTransform();
@@ -66,42 +65,61 @@ public sealed class H264Decoder : IDisposable
     private void CreateDecoderTransform()
     {
         // Enumerate H.264 decoders
-        var inputType = new MFTRegisterTypeInfo
+        var inputType = new RegisterTypeInfo
         {
             GuidMajorType = MediaTypeGuids.Video,
             GuidSubtype   = VideoFormatGuids.H264,
         };
 
-        var clsids = MediaFactory.MFTEnumEx(
+        // MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER = 0x04 | 0x40 = 0x44
+        // MFTEnumEx returns void; results come via out IntPtr (array of IMFActivate*)
+        MediaFactory.MFTEnumEx(
             TransformCategoryGuids.VideoDecoder,
-            MFTEnumFlag.Hardware | MFTEnumFlag.SortAndFilter,
-            inputType, null);
+            0x00000044u,   // Hardware | SortAndFilter
+            inputType, null,
+            out IntPtr activateArray,
+            out uint activateCount);
 
-        if (clsids.Length == 0)
+        if (activateCount == 0)
         {
-            // Fall back to software decoder
+            if (activateArray != IntPtr.Zero) Marshal.FreeCoTaskMem(activateArray);
             _logger.LogWarning("No hardware H.264 decoder found, trying software");
-            clsids = MediaFactory.MFTEnumEx(
+            // MFT_ENUM_FLAG_SYNCMFT = 0x01
+            MediaFactory.MFTEnumEx(
                 TransformCategoryGuids.VideoDecoder,
-                MFTEnumFlag.SyncMFT,
-                inputType, null);
+                0x00000001u,   // SyncMFT
+                inputType, null,
+                out activateArray,
+                out activateCount);
         }
 
-        if (clsids.Length == 0)
+        if (activateCount == 0)
+        {
+            if (activateArray != IntPtr.Zero) Marshal.FreeCoTaskMem(activateArray);
             throw new InvalidOperationException("No H.264 decoder available on this system");
+        }
 
-        var activate = clsids[0];
+        // Marshal the first COM activate pointer; release the rest
+        var firstPtr = Marshal.ReadIntPtr(activateArray);
+        for (uint i = 1; i < activateCount; i++)
+            Marshal.Release(Marshal.ReadIntPtr(activateArray, (int)(i * (uint)IntPtr.Size)));
+        Marshal.FreeCoTaskMem(activateArray);
+
+        var activate = new IMFActivate(firstPtr);
         _decoder = activate.ActivateObject<IMFTransform>();
 
         // Enable D3D11 acceleration
         if (_dxgiManager is not null)
         {
-            var attrs = _decoder.Attributes;
-            // Check if MFT supports D3D11
-            if (attrs.GetUINT32(TransformAttributeGuids.MFT_SUPPORT_DYNAMIC_FORMAT_CHANGE) != 0
-                || true) // Try anyway
+            // Try to set the D3D manager on the MFT for hardware-accelerated decoding
+            try
             {
-                _decoder.ProcessMessage(TMessageType.SetD3DManager, _dxgiManager.NativePointer);
+                _decoder.ProcessMessage(TMessageType.MessageSetD3DManager,
+                    (nuint)(nint)_dxgiManager.NativePointer);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to set D3D manager on decoder, falling back to software");
             }
         }
 
@@ -119,7 +137,7 @@ public sealed class H264Decoder : IDisposable
         outputMediaType.Set(MediaTypeAttributeKeys.FrameSize, PackSize(_width, _height));
         _decoder.SetOutputType(0, outputMediaType, 0);
 
-        _decoder.ProcessMessage(TMessageType.NotifyBeginStreaming, IntPtr.Zero);
+        _decoder.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, UIntPtr.Zero);
 
         _logger.LogInformation("H.264 decoder MFT created: {Name}", activate.FriendlyName);
     }
@@ -134,9 +152,12 @@ public sealed class H264Decoder : IDisposable
 
         // Create input sample
         using var buffer = MediaFactory.MFCreateMemoryBuffer(nalData.Length);
-        buffer.Lock(out var ptr, out _, out _);
-        nalData.CopyTo(new Span<byte>((void*)ptr, nalData.Length));
-        buffer.Unlock();
+        unsafe
+        {
+            buffer.Lock(out var ptr, out _, out _);
+            nalData.CopyTo(new Span<byte>((void*)ptr, nalData.Length));
+            buffer.Unlock();
+        }
         buffer.CurrentLength = nalData.Length;
 
         using var sample = MediaFactory.MFCreateSample();
@@ -156,11 +177,12 @@ public sealed class H264Decoder : IDisposable
 
         while (true)
         {
-            _decoder.GetOutputStreamInfo(0, out var streamInfo);
+            var streamInfo = _decoder.GetOutputStreamInfo(0);
 
             IMFSample? outputSample = null;
             IMFMediaBuffer? outputBuffer = null;
-            bool allocateOutput = (streamInfo.Flags & MFTOutputStreamInfoFlags.ProvidesSamples) == 0;
+            // MFOUTPUTSTREAMINFO_PROVIDES_SAMPLES = 0x00000100 (not exposed in Vortice enum)
+            bool allocateOutput = (((int)streamInfo.Flags) & 0x100) == 0;
 
             if (allocateOutput)
             {
@@ -169,13 +191,13 @@ public sealed class H264Decoder : IDisposable
                 outputSample.AddBuffer(outputBuffer);
             }
 
-            var outputDataBuffer = new MFTOutputDataBuffer
+            var outputDataBuffer = new OutputDataBuffer
             {
                 StreamID = 0,
                 Sample = outputSample,
             };
 
-            var hr = _decoder.ProcessOutput(0, [outputDataBuffer], out _);
+            var hr = _decoder.ProcessOutput(ProcessOutputFlags.None, 1, ref outputDataBuffer, out _);
 
             if (hr.Failure)
             {
@@ -205,11 +227,29 @@ public sealed class H264Decoder : IDisposable
         using var mediaBuffer = sample.ConvertToContiguousBuffer();
 
         // Try IMFDXGIBuffer path for GPU textures
-        if (mediaBuffer is IMFDXGIBuffer dxgiBuffer)
+        // IMFDXGIBuffer inherits from IMFMediaBuffer but is a separate COM interface,
+        // so we need to use QueryInterface
+        try
         {
-            var texture = dxgiBuffer.GetResource<ID3D11Texture2D>();
-            FrameDecoded?.Invoke(texture);
-            return;
+            var dxgiBuffer = mediaBuffer.QueryInterface<IMFDXGIBuffer>();
+            try
+            {
+                var resourcePtr = dxgiBuffer.GetResource(typeof(ID3D11Texture2D).GUID);
+                if (resourcePtr != IntPtr.Zero)
+                {
+                    var texture = new ID3D11Texture2D(resourcePtr);
+                    FrameDecoded?.Invoke(texture);
+                    return;
+                }
+            }
+            finally
+            {
+                dxgiBuffer.Dispose();
+            }
+        }
+        catch
+        {
+            // Not a DXGI buffer, fall through to CPU path
         }
 
         // Fallback: create texture from CPU buffer
@@ -218,8 +258,8 @@ public sealed class H264Decoder : IDisposable
         {
             var stagingDesc = new Texture2DDescription
             {
-                Width  = (uint)_width,
-                Height = (uint)_height,
+                Width  = _width,
+                Height = _height,
                 MipLevels = 1,
                 ArraySize = 1,
                 Format = Format.B8G8R8A8_UNorm,
@@ -231,7 +271,7 @@ public sealed class H264Decoder : IDisposable
             var data = new SubresourceData
             {
                 DataPointer = ptr,
-                RowPitch    = (uint)(_width * 4),
+                RowPitch    = _width * 4,
             };
 
             var texture = _device!.CreateTexture2D(stagingDesc, [data]);
@@ -247,7 +287,7 @@ public sealed class H264Decoder : IDisposable
 
     public void Dispose()
     {
-        _decoder?.ProcessMessage(TMessageType.NotifyEndOfStream, IntPtr.Zero);
+        _decoder?.ProcessMessage(TMessageType.MessageNotifyEndOfStream, UIntPtr.Zero);
         _decoder?.Dispose();
         _dxgiManager?.Dispose();
         _initialized = false;

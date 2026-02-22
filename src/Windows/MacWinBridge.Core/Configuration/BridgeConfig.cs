@@ -167,6 +167,12 @@ public sealed class InputConfig
 
     /// <summary>Hotkey to force-toggle KVM focus (emergency escape). Format: "Ctrl+Alt+K".</summary>
     public string ForceToggleHotkey { get; set; } = "Ctrl+Alt+K";
+
+    /// <summary>Mac display width in logical pixels (used for mouse coordinate mapping).</summary>
+    public int MacDisplayWidth { get; set; } = 2560;
+
+    /// <summary>Mac display height in logical pixels (used for mouse coordinate mapping).</summary>
+    public int MacDisplayHeight { get; set; } = 1600;
 }
 
 /// <summary>

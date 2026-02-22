@@ -9,6 +9,7 @@ using MacWinBridge.Core.Configuration;
 using MacWinBridge.Core.Protocol;
 using MacWinBridge.Core.Transport;
 using Microsoft.Extensions.Logging;
+using NAudio.Wave;
 
 namespace MacWinBridge.Audio;
 

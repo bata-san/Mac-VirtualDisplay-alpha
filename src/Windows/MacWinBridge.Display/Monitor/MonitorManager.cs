@@ -12,11 +12,13 @@ namespace MacWinBridge.Display.Monitor;
 public sealed class MonitorInfo
 {
     public required string DeviceName { get; init; }
+    public int Index     { get; init; }
     public int Left      { get; init; }
     public int Top       { get; init; }
     public int Width     { get; init; }
     public int Height    { get; init; }
     public bool IsPrimary { get; init; }
+    public int RefreshRate { get; init; }
 }
 
 /// <summary>
@@ -35,14 +37,22 @@ public static class MonitorManager
                 info.cbSize = (uint)Marshal.SizeOf<MONITORINFOEX>();
                 if (GetMonitorInfo(hMonitor, ref info))
                 {
+                    var devMode = new DEVMODE();
+                    devMode.dmSize = (ushort)Marshal.SizeOf<DEVMODE>();
+                    int refreshRate = 0;
+                    if (EnumDisplaySettings(info.szDevice, ENUM_CURRENT_SETTINGS, ref devMode))
+                        refreshRate = (int)devMode.dmDisplayFrequency;
+
                     monitors.Add(new MonitorInfo
                     {
+                        Index      = monitors.Count,
                         DeviceName = info.szDevice,
                         Left       = info.rcMonitor.Left,
                         Top        = info.rcMonitor.Top,
                         Width      = info.rcMonitor.Right - info.rcMonitor.Left,
                         Height     = info.rcMonitor.Bottom - info.rcMonitor.Top,
                         IsPrimary  = (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                        RefreshRate = refreshRate,
                     });
                 }
                 return true;
@@ -69,10 +79,31 @@ public static class MonitorManager
         public string szDevice;
     }
 
+    private const int ENUM_CURRENT_SETTINGS = -1;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DEVMODE
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public uint   dmFields;
+        public int    dmPositionX, dmPositionY;
+        public uint   dmDisplayOrientation, dmDisplayFixedOutput;
+        public int    dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public ushort dmLogPixels;
+        public uint   dmBitsPerPel;
+        public uint   dmPelsWidth, dmPelsHeight;
+        public uint   dmDisplayFlags;
+        public uint   dmDisplayFrequency;
+    }
+
     private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, ref RECT rect, IntPtr data);
 
     [DllImport("user32.dll")] private static extern bool EnumDisplayMonitors(
         IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
 }
