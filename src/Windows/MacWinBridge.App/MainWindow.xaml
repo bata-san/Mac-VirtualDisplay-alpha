@@ -127,6 +127,26 @@
                     Margin="8,0,0,0" />
         </Grid>
 
+        <!-- ── モニター選択 ── -->
+        <Border Style="{StaticResource CardBorder}">
+            <StackPanel>
+                <Grid Margin="0,0,0,10">
+                    <TextBlock Text="🖥️ 切替モニター"
+                               FontSize="13" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextBrush}"
+                               VerticalAlignment="Center" />
+                    <Button Content="↻"
+                            Style="{StaticResource IconButton}"
+                            Click="OnRefreshMonitorsClick"
+                            HorizontalAlignment="Right"
+                            Width="28" Height="28" FontSize="14"
+                            ToolTip="モニター一覧を更新" />
+                </Grid>
+                <!-- コードビハインドから動的生成 -->
+                <StackPanel x:Name="MonitorListPanel" />
+            </StackPanel>
+        </Border>
+
         <!-- ── ディスプレイ切替 ── -->
         <Border Style="{StaticResource CardBorder}">
             <Grid>
@@ -247,6 +267,29 @@
                            Foreground="{StaticResource TextMutedBrush}"
                            VerticalAlignment="Center" />
             </Grid>
+        </Border>
+
+        <!-- ── USB-C / Thunderbolt 接続情報 ── -->
+        <Border Style="{StaticResource CardBorder}">
+            <StackPanel>
+                <Grid Margin="0,0,0,10">
+                    <TextBlock Text="⚡ USB-C 接続速度"
+                               FontSize="13" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextBrush}"
+                               VerticalAlignment="Center" />
+                    <Button Content="↻"
+                            Style="{StaticResource IconButton}"
+                            Click="OnRefreshUsbClick"
+                            HorizontalAlignment="Right"
+                            Width="28" Height="28" FontSize="14"
+                            ToolTip="USB情報を再スキャン" />
+                </Grid>
+                <StackPanel x:Name="UsbInfoPanel">
+                    <TextBlock Text="スキャン中..."
+                               FontSize="11"
+                               Foreground="{StaticResource TextMutedBrush}" />
+                </StackPanel>
+            </StackPanel>
         </Border>
 
         <!-- ── フッター ── -->
