@@ -130,10 +130,12 @@ public sealed class H264Decoder : IDisposable
         inputMediaType.Set(MediaTypeAttributeKeys.FrameSize, PackSize(_width, _height));
         _decoder.SetInputType(0, inputMediaType, 0);
 
-        // Set output type: NV12 (GPU-friendly) or BGRA
+        // Set output type: ARGB32 (MFVideoFormat_ARGB32 = memory layout B,G,R,A) to match
+        // D3D11 swap chain B8G8R8A8_UNorm. Using NV12 here causes CopyResource format
+        // mismatch → GPU TDR → system freeze / forced restart.
         using var outputMediaType = MediaFactory.MFCreateMediaType();
         outputMediaType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
-        outputMediaType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12);
+        outputMediaType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.Argb32);
         outputMediaType.Set(MediaTypeAttributeKeys.FrameSize, PackSize(_width, _height));
         _decoder.SetOutputType(0, outputMediaType, 0);
 
@@ -206,7 +208,9 @@ public sealed class H264Decoder : IDisposable
                 break;
             }
 
-            // Extract texture from output sample
+            // Extract texture from output sample.
+            // When the MFT provides its own sample (allocateOutput==false) we must NOT
+            // dispose outputDataBuffer.Sample — the MFT owns it.
             var resultSample = outputDataBuffer.Sample;
             if (resultSample is not null)
             {
@@ -215,6 +219,7 @@ public sealed class H264Decoder : IDisposable
 
                 if (allocateOutput)
                     resultSample.Dispose();
+                // else: MFT-owned, do not dispose
             }
 
             outputBuffer?.Dispose();

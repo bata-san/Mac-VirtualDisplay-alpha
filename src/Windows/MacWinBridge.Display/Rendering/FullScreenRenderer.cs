@@ -30,6 +30,10 @@ public sealed class FullScreenRenderer : IDisposable
     private bool _initialized;
     private long _framesPresented;
 
+    // D3D11 immediate context is NOT thread-safe; all context operations must be
+    // serialized behind this lock since Present() is called from a background thread.
+    private readonly object _contextLock = new();
+
     public ID3D11Device?       Device  => _device;
     public ID3D11DeviceContext? Context => _context;
     public int Width  => _targetWidth;
@@ -97,18 +101,43 @@ public sealed class FullScreenRenderer : IDisposable
 
     /// <summary>
     /// Present a decoded texture to the screen.
+    /// Thread-safe: may be called from background decode thread.
     /// </summary>
     public void Present(ID3D11Texture2D sourceTexture)
     {
         if (!_initialized || _swapChain is null || _context is null) return;
 
-        // Copy source texture to swap chain back buffer
-        using var backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
-        _context.CopyResource(backBuffer, sourceTexture);
+        lock (_contextLock)
+        {
+            try
+            {
+                // GetBuffer(0) always returns the current back buffer under FlipDiscard.
+                using var backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
 
-        // Present with VSync (1) or immediate (0)
-        _swapChain.Present(1, PresentFlags.None);
-        Interlocked.Increment(ref _framesPresented);
+                // sourceTexture and backBuffer must share the same format (both B8G8R8A8_UNorm).
+                // Mismatched formats here cause GPU TDR → system freeze.
+                _context.CopyResource(backBuffer, sourceTexture);
+
+                // syncInterval=0: immediate present, no VSync block.
+                // Blocking the decode thread on VSync (syncInterval=1) causes queue buildup
+                // and eventual system-wide stall.
+                _swapChain.Present(0, PresentFlags.None);
+                Interlocked.Increment(ref _framesPresented);
+            }
+            catch (SharpGen.Runtime.SharpGenException ex)
+                when (unchecked((uint)ex.HResult) is 0x887A0005 or 0x887A0007)
+            {
+                // DXGI_ERROR_DEVICE_REMOVED (0x887A0005) or DXGI_ERROR_DEVICE_RESET (0x887A0007)
+                // GPU driver was reset (e.g. after a TDR). Mark as uninitialized so the
+                // orchestrator can reinitialize the pipeline on the next keyframe.
+                _initialized = false;
+                _logger.LogError(ex, "GPU device removed/reset — renderer will reinitialize on next keyframe");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Present failed");
+            }
+        }
     }
 
     /// <summary>
