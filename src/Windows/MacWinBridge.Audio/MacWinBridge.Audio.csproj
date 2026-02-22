@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>10</LangVersion>
+    <RootNamespace>MacWinBridge.Audio</RootNamespace>
+    <Description>Unified Audio: WASAPI capture, virtual speaker, audio streaming to Mac</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="6.0.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MacWinBridge.Core\MacWinBridge.Core.csproj" />
+  </ItemGroup>
+
+</Project>

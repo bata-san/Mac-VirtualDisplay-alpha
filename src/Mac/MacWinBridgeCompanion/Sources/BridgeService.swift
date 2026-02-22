@@ -1,0 +1,317 @@
+// Mac-Win Bridge Companion: Central bridge service managing all connections.
+
+import Foundation
+import Combine
+import Network
+
+/// Manages TCP connections from the Windows host and dispatches messages
+/// to the appropriate handlers (video, audio, input).
+@MainActor
+class BridgeService: ObservableObject {
+    
+    // MARK: - Published State
+    @Published var isConnected = false
+    @Published var connectedHost: String?
+    @Published var statusMessage = "Windowsホストからの接続を待機中..."
+    @Published var displayMode: DisplayMode = .windows
+    @Published var audioStreaming = false
+    @Published var kvmActive = false
+    @Published var audioPacketsReceived: Int64 = 0
+    @Published var videFramesReceived: Int64 = 0
+    
+    // MARK: - Ports (must match Windows side)
+    static let controlPort: UInt16 = 42100
+    static let videoPort: UInt16 = 42101
+    static let audioPort: UInt16 = 42102
+    static let discoveryPort: UInt16 = 42099
+    
+    // MARK: - Services
+    private var controlListener: NWListener?
+    private var videoListener: NWListener?
+    private var audioListener: NWListener?
+    private var discoveryListener: NWListener?
+    
+    private var controlConnection: NWConnection?
+    private var videoConnection: NWConnection?
+    private var audioConnection: NWConnection?
+    
+    private let videoReceiver = VideoReceiver()
+    private let audioMixer = AudioMixer()
+    private let inputInjector = InputInjector()
+    
+    // MARK: - Lifecycle
+    
+    init() {
+        startDiscoveryResponder()
+        startListening()
+    }
+    
+    /// Start listening on all ports for Windows host connections.
+    func startListening() {
+        statusMessage = "ポート \(Self.controlPort)-\(Self.audioPort) でリスニング中..."
+        
+        controlListener = createListener(port: Self.controlPort) { [weak self] conn in
+            self?.controlConnection = conn
+            self?.handleControlConnection(conn)
+        }
+        
+        videoListener = createListener(port: Self.videoPort) { [weak self] conn in
+            self?.videoConnection = conn
+            self?.handleVideoConnection(conn)
+        }
+        
+        audioListener = createListener(port: Self.audioPort) { [weak self] conn in
+            self?.audioConnection = conn
+            self?.handleAudioConnection(conn)
+        }
+    }
+    
+    /// Stop all listeners and connections.
+    func disconnect() {
+        controlConnection?.cancel()
+        videoConnection?.cancel()
+        audioConnection?.cancel()
+        
+        controlConnection = nil
+        videoConnection = nil
+        audioConnection = nil
+        
+        audioMixer.stop()
+        
+        isConnected = false
+        connectedHost = nil
+        audioStreaming = false
+        kvmActive = false
+        statusMessage = "切断しました"
+    }
+    
+    // MARK: - Discovery Responder
+    
+    /// Respond to UDP discovery broadcasts from the Windows host.
+    private func startDiscoveryResponder() {
+        let params = NWParameters.udp
+        params.allowLocalEndpointReuse = true
+        
+        discoveryListener = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: Self.discoveryPort)!)
+        discoveryListener?.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: .main)
+            self?.handleDiscoveryRequest(connection)
+        }
+        discoveryListener?.start(queue: .main)
+    }
+    
+    private func handleDiscoveryRequest(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, _, _ in
+            guard let data = data,
+                  let message = String(data: data, encoding: .utf8),
+                  message == "MACWINBRIDGE_DISCOVER" else { return }
+            
+            let response = "MACWINBRIDGE_HERE|\(Host.current().localizedName ?? "Mac")"
+            if let responseData = response.data(using: .utf8) {
+                connection.send(content: responseData, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+            }
+        }
+    }
+    
+    // MARK: - Connection Handling
+    
+    private func createListener(port: UInt16, handler: @escaping (NWConnection) -> Void) -> NWListener? {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        
+        guard let listener = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!) else {
+            statusMessage = "ポート \(port) のリスナー作成に失敗"
+            return nil
+        }
+        
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: .main)
+            Task { @MainActor in
+                handler(connection)
+            }
+        }
+        
+        listener.start(queue: .main)
+        return listener
+    }
+    
+    private func handleControlConnection(_ connection: NWConnection) {
+        let endpoint = connection.endpoint
+        isConnected = true
+        connectedHost = "\(endpoint)"
+        statusMessage = "Windows (\(endpoint)) から接続"
+        
+        receiveLoop(connection: connection) { [weak self] header, payload in
+            self?.handleControlMessage(type: header.type, payload: payload)
+        }
+    }
+    
+    private func handleVideoConnection(_ connection: NWConnection) {
+        receiveLoop(connection: connection) { [weak self] header, payload in
+            guard let self = self else { return }
+            self.videFramesReceived += 1
+            self.videoReceiver.processFrame(payload: payload, flags: header.flags)
+        }
+    }
+    
+    private func handleAudioConnection(_ connection: NWConnection) {
+        audioStreaming = true
+        audioMixer.start()
+        
+        receiveLoop(connection: connection) { [weak self] header, payload in
+            guard let self = self else { return }
+            self.audioPacketsReceived += 1
+            self.audioMixer.receiveAudioPacket(payload)
+        }
+    }
+    
+    // MARK: - Message Processing
+    
+    private func handleControlMessage(type: MessageType, payload: Data) {
+        switch type {
+        case .displaySwitch:
+            if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+               let modeStr = json["Mode"] as? String {
+                displayMode = modeStr == "Mac" ? .mac : .windows
+            }
+            
+        case .mouseMove:
+            guard payload.count >= 8 else { return }
+            let x = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
+            let y = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
+            inputInjector.moveMouse(x: Int(x), y: Int(y))
+            
+        case .mouseButton:
+            guard payload.count >= 4 else { return }
+            let action = payload.withUnsafeBytes { $0.load(as: Int32.self) }
+            inputInjector.mouseButton(action: Int(action))
+            
+        case .mouseScroll:
+            guard payload.count >= 8 else { return }
+            let isHorizontal = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
+            let delta = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
+            inputInjector.scroll(deltaX: isHorizontal != 0 ? Int(delta) : 0,
+                               deltaY: isHorizontal == 0 ? Int(delta) : 0)
+            
+        case .keyDown:
+            guard payload.count >= 12 else { return }
+            let vkCode = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
+            inputInjector.keyDown(vkCode: Int(vkCode))
+            
+        case .keyUp:
+            guard payload.count >= 12 else { return }
+            let vkCode = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
+            inputInjector.keyUp(vkCode: Int(vkCode))
+            
+        default:
+            break
+        }
+    }
+    
+    // MARK: - Receive Loop
+    
+    private func receiveLoop(connection: NWConnection,
+                              handler: @escaping (MessageHeader, Data) -> Void) {
+        // Read 8-byte header
+        connection.receive(minimumIncompleteLength: 8, maximumLength: 8) { [weak self] data, _, isComplete, error in
+            guard let data = data, data.count == 8 else {
+                if isComplete {
+                    Task { @MainActor in
+                        self?.handleDisconnect()
+                    }
+                }
+                return
+            }
+            
+            let header = MessageHeader.deserialize(from: data)
+            
+            if header.payloadLength > 0 {
+                // Read payload
+                connection.receive(minimumIncompleteLength: Int(header.payloadLength),
+                                   maximumLength: Int(header.payloadLength)) { payload, _, _, _ in
+                    if let payload = payload {
+                        Task { @MainActor in
+                            handler(header, payload)
+                        }
+                    }
+                    // Continue reading
+                    Task { @MainActor in
+                        self?.receiveLoop(connection: connection, handler: handler)
+                    }
+                }
+            } else {
+                Task { @MainActor in
+                    handler(header, Data())
+                    self?.receiveLoop(connection: connection, handler: handler)
+                }
+            }
+        }
+    }
+    
+    private func handleDisconnect() {
+        isConnected = false
+        audioStreaming = false
+        statusMessage = "Windows ホストが切断されました"
+        audioMixer.stop()
+    }
+}
+
+// MARK: - Shared Types
+
+enum DisplayMode: String {
+    case windows = "Windows"
+    case mac = "Mac"
+}
+
+enum MessageType: UInt16 {
+    case handshake      = 0x0001
+    case handshakeAck   = 0x0002
+    case heartbeat      = 0x0003
+    case disconnect     = 0x0004
+    
+    case videoFrame     = 0x0100
+    case videoConfig    = 0x0101
+    case displaySwitch  = 0x0102
+    case displayStatus  = 0x0103
+    
+    case audioData      = 0x0200
+    case audioConfig    = 0x0201
+    case audioControl   = 0x0202
+    
+    case mouseMove      = 0x0300
+    case mouseButton    = 0x0301
+    case mouseScroll    = 0x0302
+    case keyDown        = 0x0310
+    case keyUp          = 0x0311
+    case clipboardSync  = 0x0320
+    
+    case unknown        = 0xFFFF
+}
+
+struct MessageFlags: OptionSet {
+    let rawValue: UInt16
+    static let compressed = MessageFlags(rawValue: 1 << 0)
+    static let encrypted  = MessageFlags(rawValue: 1 << 1)
+    static let priority   = MessageFlags(rawValue: 1 << 2)
+    static let keyFrame   = MessageFlags(rawValue: 1 << 3)
+}
+
+struct MessageHeader {
+    let type: MessageType
+    let flags: MessageFlags
+    let payloadLength: UInt32
+    
+    static func deserialize(from data: Data) -> MessageHeader {
+        let typeRaw = data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self) }
+        let flagsRaw = data.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self) }
+        let length = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
+        
+        return MessageHeader(
+            type: MessageType(rawValue: typeRaw) ?? .unknown,
+            flags: MessageFlags(rawValue: flagsRaw),
+            payloadLength: length
+        )
+    }
+}

@@ -1,0 +1,28 @@
+# Build output
+bin/
+obj/
+.vs/
+
+# IDE
+*.user
+*.suo
+*.sln.docstates
+.idea/
+
+# macOS
+.DS_Store
+.build/
+DerivedData/
+*.xcuserdata
+
+# NuGet
+packages/
+*.nupkg
+
+# Logs
+*.log
+
+# Config (local machine specific)
+# config.json is auto-generated per machine
+
+publish/
