@@ -36,7 +36,6 @@ class BridgeService: ObservableObject {
     private var videoConnection: NWConnection?
     private var audioConnection: NWConnection?
     
-    private let videoReceiver = VideoReceiver()
     private let audioMixer = AudioMixer()
     private let inputInjector = InputInjector()
     let screenStreamer = ScreenStreamer()
@@ -153,11 +152,8 @@ class BridgeService: ObservableObject {
     }
     
     private func handleVideoConnection(_ connection: NWConnection) {
-        receiveLoop(connection: connection) { [weak self] header, payload in
-            guard let self = self else { return }
-            self.videoFramesSent += 1
-            self.videoReceiver.processFrame(payload: payload, flags: header.flags)
-        }
+        // Mac sends video to Windows (ScreenStreamer); this port is outbound-only.
+        // Streaming starts when Windows sends a displaySwitch(Mac) control message.
     }
     
     private func handleAudioConnection(_ connection: NWConnection) {
