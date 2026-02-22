@@ -1,6 +1,7 @@
 // Mac-Win Bridge: DXGI Desktop Duplication screen capture engine.
 // Captures frames from a specified monitor using the Windows Desktop Duplication API.
 
+using System.Buffers;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Vortice.Direct3D;
@@ -11,10 +12,15 @@ namespace MacWinBridge.Display.Capture;
 
 /// <summary>
 /// Event args containing a captured frame's pixel data.
+/// Uses ArrayPool for zero-alloc frame delivery.
 /// </summary>
 public sealed class FrameCapturedEventArgs : EventArgs
 {
     public byte[] PixelData { get; init; } = Array.Empty<byte>();
+    /// <summary>Actual data length (may be smaller than PixelData.Length if pooled).</summary>
+    public int PixelDataLength { get; init; }
+    /// <summary>True if PixelData is rented from ArrayPool and must be returned by consumer.</summary>
+    public bool IsPooled { get; init; }
     public int Width { get; init; }
     public int Height { get; init; }
     public int Stride { get; init; }
@@ -135,18 +141,26 @@ public sealed class DesktopDuplicationCapture : IDisposable
             {
                 var stride = (int)mapped.RowPitch;
                 var dataSize = stride * _height;
-                var pixelData = new byte[dataSize];
+
+                // Rent from ArrayPool to avoid per-frame GC allocation
+                var pixelData = ArrayPool<byte>.Shared.Rent(dataSize);
                 
                 unsafe
                 {
                     var srcPtr = (byte*)mapped.DataPointer;
-                    Marshal.Copy((IntPtr)srcPtr, pixelData, 0, dataSize);
+                    // Direct copy: single memcpy
+                    fixed (byte* dst = pixelData)
+                    {
+                        Buffer.MemoryCopy(srcPtr, dst, dataSize, dataSize);
+                    }
                 }
 
                 _frameCount++;
                 FrameCaptured?.Invoke(this, new FrameCapturedEventArgs
                 {
                     PixelData = pixelData,
+                    PixelDataLength = dataSize,
+                    IsPooled = true,
                     Width = _width,
                     Height = _height,
                     Stride = stride,
@@ -169,23 +183,30 @@ public sealed class DesktopDuplicationCapture : IDisposable
     }
 
     /// <summary>
-    /// Run a continuous capture loop at the specified FPS target.
+    /// Run a continuous capture loop with high-precision timing.
     /// </summary>
     public async Task RunCaptureLoopAsync(int targetFps, CancellationToken ct)
     {
         var frameInterval = TimeSpan.FromMilliseconds(1000.0 / targetFps);
         _logger.LogInformation("Starting capture loop at {Fps} FPS", targetFps);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
         while (!ct.IsCancellationRequested)
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var frameStart = sw.Elapsed;
             
             CaptureFrame(TimeSpan.FromMilliseconds(100));
 
-            sw.Stop();
-            var sleepTime = frameInterval - sw.Elapsed;
-            if (sleepTime > TimeSpan.Zero)
-                await Task.Delay(sleepTime, ct);
+            var elapsed = sw.Elapsed - frameStart;
+            var sleepTime = frameInterval - elapsed;
+            if (sleepTime > TimeSpan.FromMilliseconds(1))
+            {
+                // SpinWait for sub-ms precision when close to deadline
+                if (sleepTime.TotalMilliseconds > 2)
+                    await Task.Delay(sleepTime - TimeSpan.FromMilliseconds(1), ct);
+                while (sw.Elapsed - frameStart < frameInterval)
+                    Thread.SpinWait(100);
+            }
         }
     }
 

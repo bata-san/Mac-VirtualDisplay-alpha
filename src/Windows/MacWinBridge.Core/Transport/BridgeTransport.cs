@@ -1,4 +1,4 @@
-// Mac-Win Bridge: Transport layer – manages TCP connections between Win and Mac.
+// Mac-Win Bridge: Transport layer – high-performance TCP with zero-copy sends.
 
 using System.Buffers;
 using System.IO.Pipelines;
@@ -56,6 +56,8 @@ public sealed class BridgeTransport : IAsyncDisposable
 
         _client = await _listener.AcceptTcpClientAsync(ct);
         _client.NoDelay = true;
+        _client.SendBufferSize = 1024 * 1024;
+        _client.ReceiveBufferSize = 1024 * 1024;
         _stream = _client.GetStream();
         _logger.LogInformation("Client connected from {Endpoint}", _client.Client.RemoteEndPoint);
 
@@ -66,7 +68,10 @@ public sealed class BridgeTransport : IAsyncDisposable
     // ── Client mode ────────────────────────────────────
     public async Task ConnectAsync(string host, int port, CancellationToken ct = default)
     {
-        _client = new TcpClient { NoDelay = true };
+        _client = new TcpClient();
+        _client.NoDelay = true;
+        _client.SendBufferSize = 1024 * 1024;    // 1 MB send buffer
+        _client.ReceiveBufferSize = 1024 * 1024;  // 1 MB receive buffer
         await _client.ConnectAsync(host, port, ct);
         _stream = _client.GetStream();
         _logger.LogInformation("Connected to {Host}:{Port}", host, port);
@@ -75,7 +80,7 @@ public sealed class BridgeTransport : IAsyncDisposable
         StartReadLoop();
     }
 
-    // ── Send ───────────────────────────────────────────
+    // ── Send (single-write: header + payload combined) ──
     public async ValueTask SendAsync(MessageType type, ReadOnlyMemory<byte> payload,
         MessageFlags flags = MessageFlags.None, CancellationToken ct = default)
     {
@@ -88,10 +93,21 @@ public sealed class BridgeTransport : IAsyncDisposable
             PayloadLength = (uint)payload.Length,
         };
 
-        await _stream.WriteAsync(header.Serialize(), ct);
-        if (payload.Length > 0)
-            await _stream.WriteAsync(payload, ct);
-        await _stream.FlushAsync(ct);
+        // Combine header + payload into single write to reduce syscalls
+        var totalLen = MessageHeader.Size + payload.Length;
+        var buf = ArrayPool<byte>.Shared.Rent(totalLen);
+        try
+        {
+            header.Serialize().CopyTo(buf, 0);
+            if (payload.Length > 0)
+                payload.Span.CopyTo(buf.AsSpan(MessageHeader.Size));
+
+            await _stream.WriteAsync(buf.AsMemory(0, totalLen), ct);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buf);
+        }
     }
 
     // ── Read loop using PipeReader ─────────────────────
@@ -106,7 +122,7 @@ public sealed class BridgeTransport : IAsyncDisposable
         if (_stream is null) return;
 
         var pipe = PipeReader.Create(_stream, new StreamPipeReaderOptions(
-            bufferSize: 1024 * 256,  // 256 KB read buffer
+            bufferSize: 1024 * 512,  // 512 KB read buffer
             minimumReadSize: MessageHeader.Size));
 
         try

@@ -89,6 +89,9 @@ public sealed class AudioConfig
 
     /// <summary>Use Opus compression for lower bandwidth.</summary>
     public bool UseOpusCompression { get; set; } = true;
+
+    /// <summary>Audio routing direction: where to play audio.</summary>
+    public AudioRouting Routing { get; set; } = AudioRouting.WindowsToMac;
 }
 
 public sealed class InputConfig
@@ -127,4 +130,17 @@ public enum ScreenEdge
     Right,
     Top,
     Bottom,
+}
+
+/// <summary>
+/// Audio routing direction.
+/// </summary>
+public enum AudioRouting
+{
+    /// <summary>Windows audio plays on Mac speakers.</summary>
+    WindowsToMac,
+    /// <summary>Mac audio plays on Windows speakers.</summary>
+    MacToWindows,
+    /// <summary>Audio plays on both devices simultaneously.</summary>
+    Both,
 }

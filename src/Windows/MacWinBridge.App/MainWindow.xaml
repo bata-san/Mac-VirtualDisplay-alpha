@@ -129,10 +129,44 @@
                                VerticalAlignment="Center" />
                 </Grid>
 
-                <TextBlock Text="Windows音声 → Mac経由で再生"
+                <!-- Audio Routing Buttons -->
+                <TextBlock Text="音声の出力先" FontSize="13" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextBrush}" Margin="0,12,0,8" />
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Button x:Name="AudioToMacButton"
+                            Grid.Column="0"
+                            Content="🍎 Mac"
+                            Style="{StaticResource BridgeButton}"
+                            Click="OnAudioToMacClick"
+                            Margin="0,0,3,0" />
+
+                    <Button x:Name="AudioToWinButton"
+                            Grid.Column="1"
+                            Content="🪟 Win"
+                            Style="{StaticResource BridgeButton}"
+                            Click="OnAudioToWinClick"
+                            Margin="3,0,3,0" />
+
+                    <Button x:Name="AudioToBothButton"
+                            Grid.Column="2"
+                            Content="🔀 両方"
+                            Style="{StaticResource BridgeButton}"
+                            Click="OnAudioToBothClick"
+                            Margin="3,0,0,0" />
+                </Grid>
+
+                <TextBlock x:Name="AudioRoutingText"
+                           Text="現在: Windows音声 → Macで再生"
                            FontSize="12"
                            Foreground="{StaticResource TextMutedBrush}"
-                           Margin="0,4,0,0" />
+                           Margin="0,8,0,0" />
 
                 <TextBlock x:Name="AudioStatsText"
                            Text=""

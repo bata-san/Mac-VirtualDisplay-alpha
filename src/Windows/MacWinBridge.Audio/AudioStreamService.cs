@@ -1,6 +1,7 @@
 // Mac-Win Bridge: Audio streaming service.
-// Captures Windows audio and streams it to the Mac companion.
+// High-performance capture with routing control (Win→Mac, Mac→Win, Both).
 
+using System.Buffers;
 using MacWinBridge.Audio.Capture;
 using MacWinBridge.Audio.Processing;
 using MacWinBridge.Core.Configuration;
@@ -12,8 +13,8 @@ namespace MacWinBridge.Audio;
 
 /// <summary>
 /// Orchestrates the audio capture → convert → stream pipeline.
-/// Windows audio is captured via WASAPI loopback, converted to the target format,
-/// and streamed to the Mac companion where it's mixed with Mac's native audio.
+/// Supports flexible routing: Windows→Mac, Mac→Windows, or Both.
+/// Uses ArrayPool for zero-alloc packet construction.
 /// </summary>
 public sealed class AudioStreamService : IAsyncDisposable
 {
@@ -27,10 +28,14 @@ public sealed class AudioStreamService : IAsyncDisposable
     
     private long _packetsSent;
     private long _bytesSent;
+    private AudioRouting _currentRouting;
 
     public bool IsStreaming => _capture?.IsCapturing == true;
     public long PacketsSent => _packetsSent;
     public long BytesSent => Interlocked.Read(ref _bytesSent);
+    public AudioRouting CurrentRouting => _currentRouting;
+
+    public event EventHandler<AudioRouting>? RoutingChanged;
 
     public AudioStreamService(
         ILogger<AudioStreamService> logger,
@@ -42,6 +47,7 @@ public sealed class AudioStreamService : IAsyncDisposable
         _loggerFactory = loggerFactory;
         _config = config;
         _audioTransport = audioTransport;
+        _currentRouting = config.Audio.Routing;
     }
 
     /// <summary>
@@ -72,8 +78,29 @@ public sealed class AudioStreamService : IAsyncDisposable
         _capture.AudioCaptured += OnAudioCaptured;
         _capture.Start();
 
-        _logger.LogInformation("Audio streaming started: {Rate}Hz, {Ch}ch, {Bits}bit",
-            _config.Audio.SampleRate, _config.Audio.Channels, _config.Audio.BitsPerSample);
+        _logger.LogInformation("Audio streaming started: {Rate}Hz, {Ch}ch, {Bits}bit, routing={Routing}",
+            _config.Audio.SampleRate, _config.Audio.Channels, _config.Audio.BitsPerSample, _currentRouting);
+    }
+
+    /// <summary>
+    /// Change audio routing at runtime.
+    /// </summary>
+    public async Task SetRoutingAsync(AudioRouting routing)
+    {
+        _currentRouting = routing;
+        _config.Audio.Routing = routing;
+        _config.Save();
+
+        // Notify Mac companion about routing change
+        var payload = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Routing = routing.ToString(),
+            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        });
+        await _audioTransport.SendAsync(MessageType.AudioControl, payload);
+
+        RoutingChanged?.Invoke(this, routing);
+        _logger.LogInformation("Audio routing changed to {Routing}", routing);
     }
 
     /// <summary>
@@ -103,6 +130,7 @@ public sealed class AudioStreamService : IAsyncDisposable
             BitsPerSample = _config.Audio.BitsPerSample,
             BufferMs = _config.Audio.BufferMs,
             Compressed = _config.Audio.UseOpusCompression,
+            Routing = _currentRouting.ToString(),
         };
 
         var json = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(config);
@@ -114,11 +142,13 @@ public sealed class AudioStreamService : IAsyncDisposable
     {
         if (_converter is null) return;
 
+        // Skip sending if routing is Mac→Windows only
+        if (_currentRouting == AudioRouting.MacToWindows) return;
+
+        byte[]? rented = null;
         try
         {
             // Convert from WASAPI format to streaming format
-            var sourceFormat = new NAudio.Wave.WaveFormat(e.SampleRate, e.BitsPerSample, e.Channels);
-            
             byte[] streamData;
             if (e.BitsPerSample == 32) // Float32 from WASAPI loopback
             {
@@ -127,23 +157,30 @@ public sealed class AudioStreamService : IAsyncDisposable
             }
             else
             {
+                var sourceFormat = new NAudio.Wave.WaveFormat(e.SampleRate, e.BitsPerSample, e.Channels);
                 streamData = _converter.Convert(e.PcmData, sourceFormat);
             }
 
-            // Prepend timestamp for jitter buffer on Mac side
-            var header = BitConverter.GetBytes(e.TimestampTicks);
-            var payload = new byte[8 + streamData.Length];
-            header.CopyTo(payload, 0);
-            streamData.CopyTo(payload, 8);
+            // Use ArrayPool: timestamp header (8 bytes) + audio data
+            var payloadLen = 8 + streamData.Length;
+            rented = ArrayPool<byte>.Shared.Rent(payloadLen);
 
-            await _audioTransport.SendAsync(MessageType.AudioData, payload);
+            BitConverter.TryWriteBytes(rented.AsSpan(0, 8), e.TimestampTicks);
+            Buffer.BlockCopy(streamData, 0, rented, 8, streamData.Length);
+
+            await _audioTransport.SendAsync(MessageType.AudioData,
+                new ReadOnlyMemory<byte>(rented, 0, payloadLen));
 
             Interlocked.Increment(ref _packetsSent);
-            Interlocked.Add(ref _bytesSent, payload.Length);
+            Interlocked.Add(ref _bytesSent, payloadLen);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error streaming audio packet");
+        }
+        finally
+        {
+            if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
         }
     }
 

@@ -1,6 +1,8 @@
-// Mac-Win Bridge: Audio format converter.
-// Converts between different PCM formats for optimal streaming.
+// Mac-Win Bridge: High-performance audio format converter.
+// Converts between different PCM formats with zero-copy Span operations.
 
+using System.Buffers;
+using System.Runtime.InteropServices;
 using NAudio.Wave;
 using Microsoft.Extensions.Logging;
 
@@ -59,42 +61,50 @@ public sealed class AudioFormatConverter : IDisposable
     }
 
     /// <summary>
-    /// Fast path: convert 32-bit float stereo to 16-bit PCM stereo.
+    /// Fast path: convert 32-bit float to 16-bit PCM using Span reinterpret cast.
+    /// Zero per-sample BitConverter calls — directly operates on float/short spans.
     /// </summary>
     private byte[] ConvertFloat32ToInt16(byte[] sourceData, WaveFormat sourceFormat)
     {
-        var sampleCount = sourceData.Length / 4; // 4 bytes per float32 sample
-        var result = new byte[sampleCount * 2];  // 2 bytes per int16 sample
+        var floatSpan = MemoryMarshal.Cast<byte, float>(sourceData.AsSpan());
+        var sampleCount = floatSpan.Length;
+        var resultSize = sampleCount * 2;
+        var result = ArrayPool<byte>.Shared.Rent(resultSize);
+        var shortSpan = MemoryMarshal.Cast<byte, short>(result.AsSpan(0, resultSize));
 
         for (int i = 0; i < sampleCount; i++)
         {
-            var floatSample = BitConverter.ToSingle(sourceData, i * 4);
-
-            // Clamp to [-1.0, 1.0] and scale to int16 range
-            floatSample = Math.Clamp(floatSample, -1.0f, 1.0f);
-            var intSample = (short)(floatSample * short.MaxValue);
-
-            BitConverter.GetBytes(intSample).CopyTo(result, i * 2);
+            shortSpan[i] = (short)(Math.Clamp(floatSpan[i], -1.0f, 1.0f) * 32767f);
         }
 
+        byte[] final;
         // Handle sample rate conversion if needed
         if (sourceFormat.SampleRate != _targetSampleRate)
         {
-            return ResamplePcm16(result, sourceFormat.SampleRate, sourceFormat.Channels);
+            final = ResamplePcm16(result, resultSize, sourceFormat.SampleRate, sourceFormat.Channels);
         }
-
-        return result;
+        else
+        {
+            final = new byte[resultSize];
+            Buffer.BlockCopy(result, 0, final, 0, resultSize);
+        }
+        ArrayPool<byte>.Shared.Return(result);
+        return final;
     }
 
     /// <summary>
-    /// Simple linear interpolation resampler for PCM16 data.
+    /// Fast linear interpolation resampler using Span-based short access.
     /// </summary>
-    private byte[] ResamplePcm16(byte[] pcm16Data, int sourceSampleRate, int channels)
+    private byte[] ResamplePcm16(byte[] pcm16Data, int dataLength, int sourceSampleRate, int channels)
     {
         var ratio = (double)_targetSampleRate / sourceSampleRate;
-        var sourceSampleCount = pcm16Data.Length / (2 * channels);
+        var sourceSampleCount = dataLength / (2 * channels);
         var targetSampleCount = (int)(sourceSampleCount * ratio);
-        var result = new byte[targetSampleCount * 2 * channels];
+        var resultSize = targetSampleCount * 2 * channels;
+        var result = new byte[resultSize];
+
+        var srcShorts = MemoryMarshal.Cast<byte, short>(pcm16Data.AsSpan(0, dataLength));
+        var dstShorts = MemoryMarshal.Cast<byte, short>(result.AsSpan());
 
         for (int ch = 0; ch < channels; ch++)
         {
@@ -105,13 +115,11 @@ public sealed class AudioFormatConverter : IDisposable
                 var frac = srcPos - srcIndex;
 
                 if (srcIndex + 1 >= sourceSampleCount)
-                    srcIndex = sourceSampleCount - 2;
+                    srcIndex = Math.Max(0, sourceSampleCount - 2);
 
-                var sample1 = BitConverter.ToInt16(pcm16Data, (srcIndex * channels + ch) * 2);
-                var sample2 = BitConverter.ToInt16(pcm16Data, ((srcIndex + 1) * channels + ch) * 2);
-
-                var interpolated = (short)(sample1 + (sample2 - sample1) * frac);
-                BitConverter.GetBytes(interpolated).CopyTo(result, (i * channels + ch) * 2);
+                var s1 = srcShorts[srcIndex * channels + ch];
+                var s2 = srcShorts[(srcIndex + 1) * channels + ch];
+                dstShorts[i * channels + ch] = (short)(s1 + (s2 - s1) * frac);
             }
         }
 

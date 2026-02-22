@@ -93,15 +93,17 @@ class BridgeService: ObservableObject {
         params.allowLocalEndpointReuse = true
         
         discoveryListener = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: Self.discoveryPort)!)
-        discoveryListener?.newConnectionHandler = { [weak self] connection in
+        discoveryListener?.newConnectionHandler = { connection in
             connection.start(queue: .main)
-            self?.handleDiscoveryRequest(connection)
+            Task { @MainActor [weak self] in
+                self?.handleDiscoveryRequest(connection)
+            }
         }
         discoveryListener?.start(queue: .main)
     }
     
     private func handleDiscoveryRequest(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, _, _ in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, _, _ in
             guard let data = data,
                   let message = String(data: data, encoding: .utf8),
                   message == "MACWINBRIDGE_DISCOVER" else { return }
@@ -213,12 +215,13 @@ class BridgeService: ObservableObject {
     // MARK: - Receive Loop
     
     private func receiveLoop(connection: NWConnection,
-                              handler: @escaping (MessageHeader, Data) -> Void) {
+                              handler: @escaping @MainActor (MessageHeader, Data) -> Void) {
         // Read 8-byte header
         connection.receive(minimumIncompleteLength: 8, maximumLength: 8) { [weak self] data, _, isComplete, error in
+            guard let self = self else { return }
             guard let data = data, data.count == 8 else {
                 if isComplete {
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
                         self?.handleDisconnect()
                     }
                 }
@@ -230,19 +233,19 @@ class BridgeService: ObservableObject {
             if header.payloadLength > 0 {
                 // Read payload
                 connection.receive(minimumIncompleteLength: Int(header.payloadLength),
-                                   maximumLength: Int(header.payloadLength)) { payload, _, _, _ in
+                                   maximumLength: Int(header.payloadLength)) { [weak self] payload, _, _, _ in
                     if let payload = payload {
                         Task { @MainActor in
                             handler(header, payload)
                         }
                     }
                     // Continue reading
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
                         self?.receiveLoop(connection: connection, handler: handler)
                     }
                 }
             } else {
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
                     handler(header, Data())
                     self?.receiveLoop(connection: connection, handler: handler)
                 }

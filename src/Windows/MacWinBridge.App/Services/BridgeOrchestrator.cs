@@ -142,6 +142,28 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
+    /// Change audio routing direction.
+    /// </summary>
+    public async Task SetAudioRoutingAsync(AudioRouting routing)
+    {
+        if (AudioService is null)
+        {
+            _logger.LogWarning("Audio service not initialized");
+            return;
+        }
+
+        await AudioService.SetRoutingAsync(routing);
+        var desc = routing switch
+        {
+            AudioRouting.WindowsToMac => "音声: Win→Mac 🍎",
+            AudioRouting.MacToWindows => "音声: Mac→Win 🪟",
+            AudioRouting.Both => "音声: 両方で再生 🔀",
+            _ => "音声: 不明",
+        };
+        StatusMessage?.Invoke(this, desc);
+    }
+
+    /// <summary>
     /// Disconnect from Mac and stop all services.
     /// </summary>
     public async Task DisconnectAsync()

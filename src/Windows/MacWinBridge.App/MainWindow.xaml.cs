@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using MacWinBridge.Core.Configuration;
@@ -17,6 +18,7 @@ public partial class MainWindow : Window
 
         MacHostInput.Text = _app.Config.MacHost;
         UpdateDisplayModeUI(_app.Config.Display.Mode);
+        UpdateAudioRoutingUI(_app.Config.Audio.Routing);
         DetectMonitors();
 
         // Wire up orchestrator events
@@ -87,6 +89,47 @@ public partial class MainWindow : Window
         if (_app.Orchestrator is null) return;
         await _app.Orchestrator.SwitchDisplayModeAsync(DisplayMode.Mac);
         UpdateDisplayModeUI(DisplayMode.Mac);
+    }
+
+    // ── Audio Routing ────────────────────────────────
+    private async void OnAudioToMacClick(object sender, RoutedEventArgs e)
+    {
+        await SetAudioRoutingAsync(AudioRouting.WindowsToMac);
+    }
+
+    private async void OnAudioToWinClick(object sender, RoutedEventArgs e)
+    {
+        await SetAudioRoutingAsync(AudioRouting.MacToWindows);
+    }
+
+    private async void OnAudioToBothClick(object sender, RoutedEventArgs e)
+    {
+        await SetAudioRoutingAsync(AudioRouting.Both);
+    }
+
+    private async Task SetAudioRoutingAsync(AudioRouting routing)
+    {
+        if (_app.Orchestrator?.AudioService is null) return;
+        await _app.Orchestrator.AudioService.SetRoutingAsync(routing);
+        UpdateAudioRoutingUI(routing);
+    }
+
+    private void UpdateAudioRoutingUI(AudioRouting routing)
+    {
+        var primary = (SolidColorBrush)FindResource("PrimaryBrush");
+        var active = (SolidColorBrush)FindResource("SuccessBrush");
+
+        AudioToMacButton.Background = routing == AudioRouting.WindowsToMac ? active : primary;
+        AudioToWinButton.Background = routing == AudioRouting.MacToWindows ? active : primary;
+        AudioToBothButton.Background = routing == AudioRouting.Both ? active : primary;
+
+        AudioRoutingText.Text = routing switch
+        {
+            AudioRouting.WindowsToMac => "現在: Windows音声 → Macで再生 🍎",
+            AudioRouting.MacToWindows => "現在: Mac音声 → Windowsで再生 🪟",
+            AudioRouting.Both => "現在: 両方のデバイスで再生 🔀",
+            _ => "不明",
+        };
     }
 
     private void UpdateDisplayModeUI(DisplayMode mode)
