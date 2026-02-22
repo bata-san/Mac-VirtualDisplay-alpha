@@ -25,6 +25,7 @@ public partial class App : Application
         {
             builder.SetMinimumLevel(LogLevel.Debug);
             builder.AddConsole();
+            builder.AddProvider(new AppLoggerProvider());   // UIログパネルへ転送
         });
         services.AddSingleton(Config);
 
@@ -37,6 +38,9 @@ public partial class App : Application
             loggerFactory.CreateLogger<BridgeOrchestrator>(),
             loggerFactory,
             Config);
+
+        // StatusMessage も AppLogger へ
+        Orchestrator.StatusMessage += (_, msg) => AppLogger.Info(msg);
 
         // Show main window
         var mainWindow = new MainWindow(this);

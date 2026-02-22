@@ -1,3 +1,6 @@
+using System;
+using System.Diagnostics;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
@@ -9,6 +12,10 @@ namespace MacWinBridge.App;
 public partial class MainWindow : Window
 {
     private readonly App _app;
+    private readonly StringBuilder _logBuffer = new();
+    private bool _logPanelOpen = false;
+    private const int MaxDisplayLines = 300;
+    private int _displayLineCount = 0;
 
     // ステータスドット用カラー
     private static readonly SolidColorBrush ConnectedColor =
@@ -30,12 +37,72 @@ public partial class MainWindow : Window
         UpdateAudioRoutingUI(_app.Config.Audio.Routing);
         UpdateFooter();
 
+        // ── ログ購読 ──
+        // 既存バッファを表示
+        foreach (var line in AppLogger.GetBufferedLines())
+            AppendLogLine(line);
+
+        AppLogger.LineAdded += line =>
+            Dispatcher.BeginInvoke(() => AppendLogLine(line));
+
         // Wire up orchestrator events
         if (_app.Orchestrator is not null)
         {
             _app.Orchestrator.ConnectionChanged += (_, connected) =>
                 Dispatcher.Invoke(() => OnConnectionChanged(connected));
         }
+    }
+
+    // ── ログパネル操作 ───────────────────────────
+    private void AppendLogLine(string line)
+    {
+        _logBuffer.AppendLine(line);
+        _displayLineCount++;
+
+        // バッファが上限を超えた場合は上から削る
+        if (_displayLineCount > MaxDisplayLines)
+        {
+            var text = _logBuffer.ToString();
+            var idx = text.IndexOf('\n', text.Length / 3);
+            if (idx >= 0)
+            {
+                _logBuffer.Clear();
+                _logBuffer.Append(text[(idx + 1)..]);
+                _displayLineCount = _logBuffer.ToString().Split('\n').Length;
+            }
+        }
+
+        LogText.Text = _logBuffer.ToString();
+
+        // 最下部に自動スクロール
+        LogScroller.ScrollToEnd();
+    }
+
+    private void OnLogToggle(object sender, RoutedEventArgs e)
+    {
+        _logPanelOpen = !_logPanelOpen;
+        LogPanel.Visibility = _logPanelOpen ? Visibility.Visible : Visibility.Collapsed;
+        LogToggleButton.Content = _logPanelOpen ? "📋 隠す" : "📋 ログ";
+        Height = _logPanelOpen ? 740 : 540;
+    }
+
+    private void OnOpenLogFolderClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var path = AppLogger.LogFilePath;
+            if (!string.IsNullOrEmpty(path))
+                Process.Start("explorer.exe", $"/select,\"{path}\"");
+        }
+        catch { }
+    }
+
+    private void OnClearLogClick(object sender, RoutedEventArgs e)
+    {
+        _logBuffer.Clear();
+        _displayLineCount = 0;
+        LogText.Text = string.Empty;
+        AppLogger.Info("ログをクリアしました");
     }
 
     private void UpdateFooter()
@@ -167,5 +234,11 @@ public partial class MainWindow : Window
         // トレイに最小化
         e.Cancel = true;
         Hide();
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        AppLogger.LineAdded -= line => Dispatcher.BeginInvoke(() => AppendLogLine(line));
+        base.OnClosed(e);
     }
 }
