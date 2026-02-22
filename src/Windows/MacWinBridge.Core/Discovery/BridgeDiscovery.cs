@@ -1,36 +1,36 @@
-// Mac-Win Bridge: Service discovery via mDNS to auto-detect Mac companion.
+// Mac-Win Bridge: Service discovery via UDP broadcast.
+// Used when config.MacHost == "auto" to find the Mac companion.
 
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace MacWinBridge.Core.Discovery;
 
 /// <summary>
-/// Simple UDP broadcast-based discovery to find the Mac companion app on the network.
-/// Used when config.MacHost == "auto".
+/// UDP broadcast discovery to find the Mac companion on the local network.
+/// Supports multiple broadcast attempts for reliability.
 /// </summary>
 public sealed class BridgeDiscovery : IDisposable
 {
     private const int DiscoveryPort = 42099;
-    private const string DiscoveryMagic = "MACWINBRIDGE_DISCOVER";
-    private const string ResponseMagic = "MACWINBRIDGE_HERE";
+    private const string DiscoveryMagic  = "MACWINBRIDGE_DISCOVER";
+    private const string ResponseMagic   = "MACWINBRIDGE_HERE";
 
     private readonly ILogger<BridgeDiscovery> _logger;
-    private UdpClient? _udp;
-    private CancellationTokenSource? _cts;
+    private UdpClient? _responderUdp;
+    private CancellationTokenSource? _responderCts;
 
-    public BridgeDiscovery(ILogger<BridgeDiscovery> logger)
-    {
-        _logger = logger;
-    }
+    public BridgeDiscovery(ILogger<BridgeDiscovery> logger) => _logger = logger;
 
     /// <summary>
-    /// Broadcast a discovery request and wait for response from the Mac companion.
-    /// Returns the IP address of the Mac, or null if not found.
+    /// Broadcast discovery requests and wait for a response from Mac.
+    /// Sends multiple broadcasts for reliability.
     /// </summary>
-    public async Task<IPAddress?> DiscoverMacAsync(TimeSpan timeout, CancellationToken ct = default)
+    public async Task<IPAddress?> DiscoverMacAsync(TimeSpan timeout, int attempts = 3,
+                                                    CancellationToken ct = default)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
@@ -40,17 +40,29 @@ public sealed class BridgeDiscovery : IDisposable
             using var udp = new UdpClient();
             udp.EnableBroadcast = true;
 
-            var msg = System.Text.Encoding.UTF8.GetBytes(DiscoveryMagic);
-            await udp.SendAsync(msg, msg.Length, new IPEndPoint(IPAddress.Broadcast, DiscoveryPort));
-            _logger.LogInformation("Sent discovery broadcast on port {Port}", DiscoveryPort);
+            var msg = Encoding.UTF8.GetBytes(DiscoveryMagic);
 
-            var result = await udp.ReceiveAsync(cts.Token);
-            var response = System.Text.Encoding.UTF8.GetString(result.Buffer);
-
-            if (response.StartsWith(ResponseMagic))
+            for (int i = 0; i < attempts && !cts.Token.IsCancellationRequested; i++)
             {
-                _logger.LogInformation("Mac discovered at {Address}", result.RemoteEndPoint.Address);
-                return result.RemoteEndPoint.Address;
+                await udp.SendAsync(msg, msg.Length, new IPEndPoint(IPAddress.Broadcast, DiscoveryPort));
+                _logger.LogInformation("Discovery broadcast #{N} sent on port {Port}", i + 1, DiscoveryPort);
+
+                // Wait briefly for a response before next attempt
+                var receiveTask = udp.ReceiveAsync(cts.Token);
+                var delayTask = Task.Delay(TimeSpan.FromMilliseconds(timeout.TotalMilliseconds / attempts), cts.Token);
+                var completed = await Task.WhenAny(receiveTask.AsTask(), delayTask);
+
+                if (completed == receiveTask.AsTask() && receiveTask.IsCompletedSuccessfully)
+                {
+                    var result = await receiveTask;
+                    var response = Encoding.UTF8.GetString(result.Buffer);
+
+                    if (response.StartsWith(ResponseMagic))
+                    {
+                        _logger.LogInformation("Mac discovered at {Address}", result.RemoteEndPoint.Address);
+                        return result.RemoteEndPoint.Address;
+                    }
+                }
             }
         }
         catch (OperationCanceledException)
@@ -66,36 +78,39 @@ public sealed class BridgeDiscovery : IDisposable
     }
 
     /// <summary>
-    /// Start listening for discovery requests (used in server/responder mode).
+    /// Start listening for discovery requests (responder/server mode).
     /// </summary>
     public void StartResponder()
     {
-        _cts = new CancellationTokenSource();
-        _ = Task.Run(() => ResponderLoopAsync(_cts.Token));
+        _responderCts = new CancellationTokenSource();
+        _ = Task.Run(() => ResponderLoopAsync(_responderCts.Token));
     }
 
     private async Task ResponderLoopAsync(CancellationToken ct)
     {
-        _udp = new UdpClient(DiscoveryPort);
+        _responderUdp = new UdpClient(DiscoveryPort);
         _logger.LogInformation("Discovery responder listening on port {Port}", DiscoveryPort);
 
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                var result = await _udp.ReceiveAsync(ct);
-                var msg = System.Text.Encoding.UTF8.GetString(result.Buffer);
+                var result = await _responderUdp.ReceiveAsync(ct);
+                var msg = Encoding.UTF8.GetString(result.Buffer);
 
                 if (msg == DiscoveryMagic)
                 {
-                    var response = System.Text.Encoding.UTF8.GetBytes(
-                        $"{ResponseMagic}|{Environment.MachineName}");
-                    await _udp.SendAsync(response, response.Length, result.RemoteEndPoint);
+                    var response = Encoding.UTF8.GetBytes($"{ResponseMagic}|{Environment.MachineName}");
+                    await _responderUdp.SendAsync(response, response.Length, result.RemoteEndPoint);
                     _logger.LogInformation("Responded to discovery from {Address}", result.RemoteEndPoint);
                 }
             }
         }
         catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Responder error");
+        }
     }
 
     /// <summary>
@@ -104,20 +119,19 @@ public sealed class BridgeDiscovery : IDisposable
     /// </summary>
     public static IPAddress? GetPreferredLocalAddress()
     {
-        // Look for USB network adapters first (USB-C connection)
+        // Look for USB network adapters first (USB-C direct connection)
         foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
         {
             if (nic.OperationalStatus != OperationalStatus.Up) continue;
 
             var isUsb = nic.Description.Contains("RNDIS", StringComparison.OrdinalIgnoreCase)
                      || nic.Description.Contains("CDC", StringComparison.OrdinalIgnoreCase)
-                     || nic.Description.Contains("USB", StringComparison.OrdinalIgnoreCase)
-                        && nic.Description.Contains("Ethernet", StringComparison.OrdinalIgnoreCase);
+                     || (nic.Description.Contains("USB", StringComparison.OrdinalIgnoreCase)
+                         && nic.Description.Contains("Ethernet", StringComparison.OrdinalIgnoreCase));
 
             if (!isUsb) continue;
 
-            var props = nic.GetIPProperties();
-            var addr = props.UnicastAddresses
+            var addr = nic.GetIPProperties().UnicastAddresses
                 .FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork);
             if (addr is not null) return addr.Address;
         }
@@ -133,8 +147,8 @@ public sealed class BridgeDiscovery : IDisposable
 
     public void Dispose()
     {
-        _cts?.Cancel();
-        _cts?.Dispose();
-        _udp?.Dispose();
+        _responderCts?.Cancel();
+        _responderCts?.Dispose();
+        _responderUdp?.Dispose();
     }
 }

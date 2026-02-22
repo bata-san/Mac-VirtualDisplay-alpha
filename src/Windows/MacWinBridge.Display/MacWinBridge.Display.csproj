@@ -1,21 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net6.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <LangVersion>10</LangVersion>
+    <LangVersion>12</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>MacWinBridge.Display</RootNamespace>
-    <Description>Display Switcher: DXGI Desktop Duplication capture and NDI/streaming</Description>
+    <Description>Display Switcher: Video receiving, H.264 decoding, and fullscreen rendering</Description>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Vortice.Direct3D11" Version="2.4.2" />
-    <PackageReference Include="Vortice.DXGI" Version="2.4.2" />
-    <PackageReference Include="Vortice.DirectX" Version="2.4.2" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="6.0.4" />
-    <PackageReference Include="System.Management" Version="6.0.2" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.5.0" />
+    <PackageReference Include="Vortice.DXGI" Version="3.5.0" />
+    <PackageReference Include="Vortice.DirectX" Version="3.5.0" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.5.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

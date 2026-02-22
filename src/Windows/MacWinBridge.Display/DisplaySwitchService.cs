@@ -1,18 +1,27 @@
-// Mac-Win Bridge: Display Switcher service.
-// Orchestrates switching the 2nd monitor between Windows and Mac modes.
+// Mac-Win Bridge: Display switching service.
+// Manages the transition between Windows mode (normal dual screen)
+// and Mac mode (2nd monitor shows Mac screen via H.264 stream).
 
 using MacWinBridge.Core.Configuration;
 using MacWinBridge.Core.Protocol;
 using MacWinBridge.Core.Transport;
-using MacWinBridge.Display.Capture;
+using MacWinBridge.Display.Decoding;
 using MacWinBridge.Display.Monitor;
+using MacWinBridge.Display.Rendering;
 using MacWinBridge.Display.Streaming;
 using Microsoft.Extensions.Logging;
 
 namespace MacWinBridge.Display;
 
+public enum DisplayMode
+{
+    Windows,    // Normal dual-screen, 2nd monitor used by Windows
+    Mac,        // 2nd monitor shows Mac screen via streaming
+}
+
 /// <summary>
-/// High-level service that manages the display switching workflow.
+/// Orchestrates the display mode: creates/destroys the video pipeline
+/// when switching between Windows and Mac modes.
 /// </summary>
 public sealed class DisplaySwitchService : IAsyncDisposable
 {
@@ -20,122 +29,153 @@ public sealed class DisplaySwitchService : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly BridgeConfig _config;
     private readonly BridgeTransport _videoTransport;
+    private readonly BridgeTransport _controlTransport;
 
-    private DesktopDuplicationCapture? _capture;
-    private VideoStreamer? _streamer;
-    private DisplayMode _currentMode;
+    private H264Decoder?        _decoder;
+    private FullScreenRenderer? _renderer;
+    private VideoReceiver?      _receiver;
+
+    private DisplayMode _currentMode = DisplayMode.Windows;
 
     public DisplayMode CurrentMode => _currentMode;
+    public VideoReceiver? Receiver => _receiver;
+    public FullScreenRenderer? Renderer => _renderer;
+    public H264Decoder? Decoder => _decoder;
+
     public event EventHandler<DisplayMode>? ModeChanged;
 
     public DisplaySwitchService(
         ILogger<DisplaySwitchService> logger,
         ILoggerFactory loggerFactory,
         BridgeConfig config,
-        BridgeTransport videoTransport)
+        BridgeTransport videoTransport,
+        BridgeTransport controlTransport)
     {
-        _logger = logger;
-        _loggerFactory = loggerFactory;
-        _config = config;
-        _videoTransport = videoTransport;
-        _currentMode = config.Display.Mode;
+        _logger           = logger;
+        _loggerFactory    = loggerFactory;
+        _config           = config;
+        _videoTransport   = videoTransport;
+        _controlTransport = controlTransport;
     }
 
     /// <summary>
-    /// Switch the 2nd monitor to the specified mode.
+    /// Switch to Mac mode: create decoder, renderer, and start receiving video.
     /// </summary>
-    public async Task SwitchModeAsync(DisplayMode targetMode)
+    public async Task SwitchToMacAsync()
     {
-        if (_currentMode == targetMode)
+        if (_currentMode == DisplayMode.Mac)
         {
-            _logger.LogInformation("Already in {Mode} mode", targetMode);
+            _logger.LogWarning("Already in Mac mode");
             return;
         }
 
-        _logger.LogInformation("Switching display from {From} to {To}", _currentMode, targetMode);
+        // Find target monitor
+        var monitors = MonitorManager.GetMonitors();
+        var targetIdx = _config.Display.TargetMonitor;
+        MonitorInfo? target = null;
 
-        switch (targetMode)
+        if (targetIdx >= 0 && targetIdx < monitors.Count)
         {
-            case DisplayMode.Mac:
-                await ActivateMacModeAsync();
-                break;
-            case DisplayMode.Windows:
-                await ActivateWindowsModeAsync();
-                break;
+            target = monitors[targetIdx];
+        }
+        else
+        {
+            // Auto-detect: first non-primary monitor
+            target = monitors.FirstOrDefault(m => !m.IsPrimary);
         }
 
-        _currentMode = targetMode;
-        _config.Display.Mode = targetMode;
-        _config.Save();
-
-        // Notify Mac companion about the mode switch
-        var payload = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+        if (target is null)
         {
-            Mode = targetMode.ToString(),
-            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            _logger.LogError("No secondary monitor found for Mac mode");
+            return;
+        }
+
+        _logger.LogInformation("Switching to Mac mode on monitor: {Name} ({W}x{H})",
+            target.DeviceName, target.Width, target.Height);
+
+        // Create renderer (D3D11 fullscreen window on 2nd monitor)
+        _renderer = new FullScreenRenderer(
+            _loggerFactory.CreateLogger<FullScreenRenderer>());
+        _renderer.Initialize(target);
+
+        // Create decoder (uses renderer's D3D11 device)
+        _decoder = new H264Decoder(
+            _loggerFactory.CreateLogger<H264Decoder>());
+        _decoder.Initialize(_renderer.Device!, _renderer.Context!, target.Width, target.Height);
+
+        // Create receiver pipeline
+        _receiver = new VideoReceiver(
+            _loggerFactory.CreateLogger<VideoReceiver>(),
+            _videoTransport, _decoder, _renderer);
+        _receiver.Start();
+
+        // Notify Mac to start streaming
+        var switchPayload = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Mode = "Mac",
+            Width = target.Width,
+            Height = target.Height,
+            Fps = _config.Display.Fps,
+            Bitrate = _config.Display.Bitrate,
+            Codec = _config.Display.Codec.ToString(),
         });
-        await _videoTransport.SendAsync(MessageType.DisplaySwitch, payload);
+        await _controlTransport.SendAsync(MessageType.DisplaySwitch, switchPayload);
 
-        ModeChanged?.Invoke(this, targetMode);
-        _logger.LogInformation("Display mode switched to {Mode}", targetMode);
+        _currentMode = DisplayMode.Mac;
+        ModeChanged?.Invoke(this, DisplayMode.Mac);
+        _logger.LogInformation("Switched to Mac mode");
     }
 
     /// <summary>
-    /// Toggle between Windows and Mac mode.
+    /// Switch back to Windows mode: stop receiving, destroy pipeline.
     /// </summary>
-    public Task ToggleModeAsync()
+    public async Task SwitchToWindowsAsync()
     {
-        var target = _currentMode == DisplayMode.Windows ? DisplayMode.Mac : DisplayMode.Windows;
-        return SwitchModeAsync(target);
-    }
-
-    /// <summary>
-    /// Get information about all connected monitors.
-    /// </summary>
-    public List<MonitorInfo> GetMonitors() => MonitorManager.GetMonitors();
-
-    private async Task ActivateMacModeAsync()
-    {
-        // 1. Initialize desktop duplication capture on the target monitor
-        _capture = new DesktopDuplicationCapture(
-            _loggerFactory.CreateLogger<DesktopDuplicationCapture>(),
-            _config.Display.TargetMonitorIndex);
-
-        _capture.Initialize();
-
-        // 2. Start video streamer
-        _streamer = new VideoStreamer(
-            _loggerFactory.CreateLogger<VideoStreamer>(),
-            _capture,
-            _videoTransport);
-
-        await _streamer.SendVideoConfigAsync();
-        _streamer.Start(_config.Display.MaxFps);
-
-        _logger.LogInformation("Mac mode activated – streaming from monitor {Index}",
-            _config.Display.TargetMonitorIndex);
-    }
-
-    private async Task ActivateWindowsModeAsync()
-    {
-        // Stop streaming and release capture resources
-        if (_streamer is not null)
+        if (_currentMode == DisplayMode.Windows)
         {
-            await _streamer.StopAsync();
-            await _streamer.DisposeAsync();
-            _streamer = null;
+            _logger.LogWarning("Already in Windows mode");
+            return;
         }
 
-        _capture?.Dispose();
-        _capture = null;
+        // Stop pipeline
+        _receiver?.Stop();
+        _renderer?.Hide();
+        _decoder?.Dispose();
+        _renderer?.Dispose();
 
-        _logger.LogInformation("Windows mode activated – normal dual-screen restored");
+        _receiver = null;
+        _decoder  = null;
+        _renderer = null;
+
+        // Notify Mac to stop streaming
+        var switchPayload = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Mode = "Windows",
+        });
+        await _controlTransport.SendAsync(MessageType.DisplaySwitch, switchPayload);
+
+        _currentMode = DisplayMode.Windows;
+        ModeChanged?.Invoke(this, DisplayMode.Windows);
+        _logger.LogInformation("Switched to Windows mode");
+    }
+
+    /// <summary>
+    /// Toggle between modes.
+    /// </summary>
+    public async Task ToggleModeAsync()
+    {
+        if (_currentMode == DisplayMode.Windows)
+            await SwitchToMacAsync();
+        else
+            await SwitchToWindowsAsync();
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_streamer is not null)
-            await _streamer.DisposeAsync();
-        _capture?.Dispose();
+        if (_currentMode == DisplayMode.Mac)
+            await SwitchToWindowsAsync();
+
+        if (_receiver is not null)
+            await _receiver.DisposeAsync();
     }
 }

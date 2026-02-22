@@ -1,15 +1,154 @@
-// Mac-Win Bridge Companion: Input injection – converts Windows input events to macOS CGEvents.
+// Mac-Win Bridge Companion: Input injection on macOS.
+// Receives mouse/keyboard events from Windows and injects them as CGEvents.
 
 import Foundation
 import CoreGraphics
 
-/// Injects mouse and keyboard events into macOS from the Windows host.
-/// Uses CGEvent API for precise, low-latency input injection.
-class InputInjector {
+/// Injects mouse and keyboard events received from Windows into macOS.
+/// Handles coordinate scaling and edge detection for CursorReturn.
+class InputInjector: ObservableObject {
     
-    // Windows VK code to macOS keycode mapping (common keys)
-    private static let vkToMacKeycode: [Int: UInt16] = [
-        // Letters A-Z
+    @Published var isActive = false
+    
+    private var screenWidth: CGFloat = 0
+    private var screenHeight: CGFloat = 0
+    private var lastMouseX: CGFloat = 0
+    private var lastMouseY: CGFloat = 0
+    
+    // Callback to send CursorReturn to Windows
+    var onCursorReturn: ((String, Double) -> Void)?
+    
+    // Which edge of Mac corresponds to Windows (opposite of Windows' MacEdge setting)
+    // If Windows has MacEdge=Right, cursor enters Mac from Left, so return edge is Left
+    private var returnEdge: String = "Left"
+    
+    /// Configure the injector with Mac screen dimensions.
+    func configure(width: CGFloat, height: CGFloat, returnEdge: String = "Left") {
+        self.screenWidth = width
+        self.screenHeight = height
+        self.returnEdge = returnEdge
+        isActive = true
+        print("[InputInjector] Configured: \(Int(width))×\(Int(height)), return edge: \(returnEdge)")
+    }
+    
+    // MARK: - Mouse Injection
+    
+    func injectMouseMove(x: Int, y: Int) {
+        let cx = CGFloat(x)
+        let cy = CGFloat(y)
+        
+        // Check if cursor left the Mac screen (should return to Windows)
+        if shouldReturnToWindows(x: cx, y: cy) {
+            let position = calculateReturnPosition(x: cx, y: cy)
+            onCursorReturn?(returnEdge, position)
+            return
+        }
+        
+        // Clamp to screen
+        let clampedX = min(max(cx, 0), screenWidth - 1)
+        let clampedY = min(max(cy, 0), screenHeight - 1)
+        
+        lastMouseX = clampedX
+        lastMouseY = clampedY
+        
+        let point = CGPoint(x: clampedX, y: clampedY)
+        if let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                               mouseCursorPosition: point, mouseButton: .left) {
+            event.post(tap: .cghidEventTap)
+        }
+    }
+    
+    func injectMouseButton(action: Int) {
+        let point = CGPoint(x: lastMouseX, y: lastMouseY)
+        
+        let (eventType, button): (CGEventType, CGMouseButton) = switch action {
+        case 1: (.leftMouseDown,  .left)
+        case 2: (.leftMouseUp,    .left)
+        case 3: (.rightMouseDown, .right)
+        case 4: (.rightMouseUp,   .right)
+        case 5: (.otherMouseDown, .center)
+        case 6: (.otherMouseUp,   .center)
+        default: return
+        }
+        
+        if let event = CGEvent(mouseEventSource: nil, mouseType: eventType,
+                               mouseCursorPosition: point, mouseButton: button) {
+            event.post(tap: .cghidEventTap)
+        }
+    }
+    
+    func injectMouseScroll(deltaX: Int, deltaY: Int) {
+        if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                               wheelCount: 2,
+                               wheel1: Int32(deltaY / 120),
+                               wheel2: Int32(deltaX / 120)) {
+            event.post(tap: .cghidEventTap)
+        }
+    }
+    
+    // MARK: - Keyboard Injection
+    
+    func injectKeyDown(vkCode: Int) {
+        guard let macKeyCode = windowsVKToMacKeyCode(vkCode) else { return }
+        if let event = CGEvent(keyboardEventSource: nil, virtualKey: macKeyCode, keyDown: true) {
+            applyModifiers(event: event, vkCode: vkCode)
+            event.post(tap: .cghidEventTap)
+        }
+    }
+    
+    func injectKeyUp(vkCode: Int) {
+        guard let macKeyCode = windowsVKToMacKeyCode(vkCode) else { return }
+        if let event = CGEvent(keyboardEventSource: nil, virtualKey: macKeyCode, keyDown: false) {
+            applyModifiers(event: event, vkCode: vkCode)
+            event.post(tap: .cghidEventTap)
+        }
+    }
+    
+    // MARK: - Edge Detection (CursorReturn)
+    
+    private func shouldReturnToWindows(x: CGFloat, y: CGFloat) -> Bool {
+        switch returnEdge {
+        case "Left":   return x < 0
+        case "Right":  return x >= screenWidth
+        case "Top":    return y < 0
+        case "Bottom": return y >= screenHeight
+        default:       return false
+        }
+    }
+    
+    private func calculateReturnPosition(x: CGFloat, y: CGFloat) -> Double {
+        switch returnEdge {
+        case "Left", "Right":
+            return Double(y / screenHeight)  // vertical position as 0.0–1.0
+        case "Top", "Bottom":
+            return Double(x / screenWidth)   // horizontal position as 0.0–1.0
+        default:
+            return 0.5
+        }
+    }
+    
+    // MARK: - Key Mapping (Windows VK → macOS CGKeyCode)
+    
+    private func windowsVKToMacKeyCode(_ vk: Int) -> CGKeyCode? {
+        return vkToMacMap[vk]
+    }
+    
+    private func applyModifiers(event: CGEvent, vkCode: Int) {
+        // Modifier keys need special flag handling
+        var flags = event.flags
+        switch vkCode {
+        case 0x10, 0xA0, 0xA1: flags.insert(.maskShift)
+        case 0x11, 0xA2, 0xA3: flags.insert(.maskControl)
+        case 0x12, 0xA4, 0xA5: flags.insert(.maskAlternate)
+        case 0x5B, 0x5C:       flags.insert(.maskCommand)  // Win key → Cmd
+        default: break
+        }
+        event.flags = flags
+    }
+    
+    // Comprehensive VK → macOS key code mapping (US + JIS common keys)
+    private let vkToMacMap: [Int: CGKeyCode] = [
+        // Letters
         0x41: 0x00, // A
         0x42: 0x0B, // B
         0x43: 0x08, // C
@@ -37,29 +176,17 @@ class InputInjector {
         0x59: 0x10, // Y
         0x5A: 0x06, // Z
         
-        // Numbers 0-9
-        0x30: 0x1D, 0x31: 0x12, 0x32: 0x13, 0x33: 0x14, 0x34: 0x15,
-        0x35: 0x17, 0x36: 0x16, 0x37: 0x1A, 0x38: 0x1C, 0x39: 0x19,
-        
-        // Special keys
-        0x0D: 0x24, // Enter → Return
-        0x1B: 0x35, // Escape
-        0x09: 0x30, // Tab
-        0x20: 0x31, // Space
-        0x08: 0x33, // Backspace → Delete
-        0x2E: 0x75, // Delete → Forward Delete
-        
-        // Arrow keys
-        0x25: 0x7B, // Left
-        0x26: 0x7E, // Up
-        0x27: 0x7C, // Right
-        0x28: 0x7D, // Down
-        
-        // Modifiers
-        0x10: 0x38, // Shift → Left Shift
-        0x11: 0x3B, // Ctrl → Left Control
-        0x12: 0x37, // Alt → Command (mapped to Cmd for Mac convenience)
-        0x5B: 0x3A, // Win → Option
+        // Numbers
+        0x30: 0x1D, // 0
+        0x31: 0x12, // 1
+        0x32: 0x13, // 2
+        0x33: 0x14, // 3
+        0x34: 0x15, // 4
+        0x35: 0x17, // 5
+        0x36: 0x16, // 6
+        0x37: 0x1A, // 7
+        0x38: 0x1C, // 8
+        0x39: 0x19, // 9
         
         // Function keys
         0x70: 0x7A, // F1
@@ -74,70 +201,52 @@ class InputInjector {
         0x79: 0x6D, // F10
         0x7A: 0x67, // F11
         0x7B: 0x6F, // F12
+        
+        // Special keys
+        0x08: 0x33, // Backspace → Delete
+        0x09: 0x30, // Tab
+        0x0D: 0x24, // Enter → Return
+        0x1B: 0x35, // Escape
+        0x20: 0x31, // Space
+        0x2E: 0x75, // Delete → Forward Delete
+        
+        // Arrow keys
+        0x25: 0x7B, // Left
+        0x26: 0x7E, // Up
+        0x27: 0x7C, // Right
+        0x28: 0x7D, // Down
+        
+        // Modifiers
+        0x10: 0x38, // Shift
+        0xA0: 0x38, // LShift
+        0xA1: 0x3C, // RShift
+        0x11: 0x3B, // Ctrl → Control
+        0xA2: 0x3B, // LCtrl
+        0xA3: 0x3E, // RCtrl
+        0x12: 0x3A, // Alt → Option
+        0xA4: 0x3A, // LAlt
+        0xA5: 0x3D, // RAlt
+        0x5B: 0x37, // LWin → Command
+        0x5C: 0x36, // RWin → RCommand
+        0x14: 0x39, // CapsLock
+        
+        // Punctuation
+        0xBA: 0x29, // ;: → Semicolon
+        0xBB: 0x18, // =+ → Equal
+        0xBC: 0x2B, // ,< → Comma
+        0xBD: 0x1B, // -_ → Minus
+        0xBE: 0x2F, // .> → Period
+        0xBF: 0x2C, // /? → Slash
+        0xC0: 0x32, // `~ → Grave
+        0xDB: 0x21, // [{ → LeftBracket
+        0xDC: 0x2A, // \| → Backslash
+        0xDD: 0x1E, // ]} → RightBracket
+        0xDE: 0x27, // '" → Quote
+        
+        // JIS-specific
+        0xF2: 0x66, // 英数 (Eisu) → JIS Eisu
+        0xF3: 0x68, // かな (Kana) → JIS Kana
+        0x1C: 0x66, // Henkan → JIS Eisu
+        0x1D: 0x68, // Muhenkan → JIS Kana
     ]
-    
-    /// Move the mouse cursor to the specified screen position.
-    func moveMouse(x: Int, y: Int) {
-        let point = CGPoint(x: x, y: y)
-        
-        if let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
-                                mouseCursorPosition: point, mouseButton: .left) {
-            event.post(tap: .cghidEventTap)
-        }
-    }
-    
-    /// Simulate a mouse button press/release.
-    /// Action values match Windows MouseHookAction enum.
-    func mouseButton(action: Int) {
-        let cursorPos = CGEvent(source: nil)?.location ?? .zero
-        
-        let (eventType, button): (CGEventType, CGMouseButton) = {
-            switch action {
-            case 1: return (.leftMouseDown,  .left)   // LeftDown
-            case 2: return (.leftMouseUp,    .left)   // LeftUp
-            case 3: return (.rightMouseDown, .right)   // RightDown
-            case 4: return (.rightMouseUp,   .right)   // RightUp
-            case 5: return (.otherMouseDown, .center)  // MiddleDown
-            case 6: return (.otherMouseUp,   .center)  // MiddleUp
-            default: return (.leftMouseDown, .left)
-            }
-        }()
-        
-        if let event = CGEvent(mouseEventSource: nil, mouseType: eventType,
-                                mouseCursorPosition: cursorPos, mouseButton: button) {
-            event.post(tap: .cghidEventTap)
-        }
-    }
-    
-    /// Simulate scroll wheel.
-    func scroll(deltaX: Int, deltaY: Int) {
-        if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
-                                wheelCount: 2,
-                                wheel1: Int32(deltaY / 120),
-                                wheel2: Int32(deltaX / 120),
-                                wheel3: 0) {
-            event.post(tap: .cghidEventTap)
-        }
-    }
-    
-    /// Simulate key down.
-    func keyDown(vkCode: Int) {
-        guard let macKeycode = Self.vkToMacKeycode[vkCode] else {
-            print("[InputInjector] Unknown VK code: \(vkCode)")
-            return
-        }
-        
-        if let event = CGEvent(keyboardEventSource: nil, virtualKey: macKeycode, keyDown: true) {
-            event.post(tap: .cghidEventTap)
-        }
-    }
-    
-    /// Simulate key up.
-    func keyUp(vkCode: Int) {
-        guard let macKeycode = Self.vkToMacKeycode[vkCode] else { return }
-        
-        if let event = CGEvent(keyboardEventSource: nil, virtualKey: macKeycode, keyDown: false) {
-            event.post(tap: .cghidEventTap)
-        }
-    }
 }

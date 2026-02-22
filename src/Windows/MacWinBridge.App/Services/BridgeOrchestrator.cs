@@ -1,5 +1,6 @@
 // Mac-Win Bridge: Orchestrator – coordinates all services.
 
+using System.Timers;
 using MacWinBridge.Audio;
 using MacWinBridge.Core.Configuration;
 using MacWinBridge.Core.Discovery;
@@ -33,8 +34,17 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
     public bool IsConnected { get; private set; }
     public string? ConnectedMacName { get; private set; }
 
+    // Video statistics (updated by timer)
+    public double VideoFps { get; private set; }
+    public double DecodingLatencyMs { get; private set; }
+    public double BandwidthMbps { get; private set; }
+    public string VideoResolution { get; private set; } = "—";
+
+    private System.Timers.Timer? _statsTimer;
+
     public event EventHandler<bool>? ConnectionChanged;
     public event EventHandler<string>? StatusMessage;
+    public event EventHandler? StatsUpdated;
 
     public BridgeOrchestrator(
         ILogger<BridgeOrchestrator> logger,
@@ -93,7 +103,7 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
             // Initialize services
             DisplayService = new DisplaySwitchService(
                 _loggerFactory.CreateLogger<DisplaySwitchService>(),
-                _loggerFactory, _config, _videoTransport);
+                _loggerFactory, _config, _videoTransport, _controlTransport);
 
             AudioService = new AudioStreamService(
                 _loggerFactory.CreateLogger<AudioStreamService>(),
@@ -113,6 +123,11 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
             ConnectedMacName = macHost;
             ConnectionChanged?.Invoke(this, true);
             StatusMessage?.Invoke(this, $"Mac ({macHost}) に接続完了 ✓");
+
+            // Start stats polling
+            _statsTimer = new System.Timers.Timer(1000);
+            _statsTimer.Elapsed += OnStatsTimerElapsed;
+            _statsTimer.Start();
 
             _logger.LogInformation("Bridge connected to Mac at {Host}", macHost);
         }
@@ -135,7 +150,11 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
             return;
         }
 
-        await DisplayService.SwitchModeAsync(mode);
+        if (mode == DisplayMode.Mac)
+            await DisplayService.SwitchToMacAsync();
+        else
+            await DisplayService.SwitchToWindowsAsync();
+
         StatusMessage?.Invoke(this, mode == DisplayMode.Mac
             ? "ディスプレイ: Macモード 🖥️"
             : "ディスプレイ: Windowsモード 🪟");
@@ -168,6 +187,10 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
     /// </summary>
     public async Task DisconnectAsync()
     {
+        _statsTimer?.Stop();
+        _statsTimer?.Dispose();
+        _statsTimer = null;
+
         KvmService?.Stop();
         KvmService?.Dispose();
         KvmService = null;
@@ -197,6 +220,38 @@ public sealed class BridgeOrchestrator : IAsyncDisposable
         ConnectionChanged?.Invoke(this, false);
 
         _logger.LogInformation("Bridge disconnected");
+    }
+
+    private void OnStatsTimerElapsed(object? sender, ElapsedEventArgs e)
+    {
+        if (!IsConnected) return;
+
+        // Read video stats from receiver
+        if (DisplayService?.Receiver is { } receiver)
+        {
+            VideoFps = receiver.CurrentFps;
+            DecodingLatencyMs = receiver.AverageDecodeMs;
+        }
+        else
+        {
+            VideoFps = 0;
+            DecodingLatencyMs = 0;
+        }
+
+        // Read bandwidth from video transport
+        if (_videoTransport is not null)
+        {
+            BandwidthMbps = _videoTransport.BytesReceived * 8.0 / 1_000_000.0;
+            _videoTransport.ResetCounters();
+        }
+
+        // Resolution from renderer
+        if (DisplayService?.Renderer is { } renderer)
+        {
+            VideoResolution = $"{renderer.Width}×{renderer.Height}";
+        }
+
+        StatsUpdated?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnDisconnected()

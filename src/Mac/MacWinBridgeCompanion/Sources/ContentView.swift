@@ -1,192 +1,230 @@
-// Mac-Win Bridge Companion: Main content view.
+// Mac-Win Bridge Companion: Main content view (SwiftUI).
 
 import SwiftUI
 
 struct ContentView: View {
-    @EnvironmentObject var bridge: BridgeService
+    @ObservedObject var service: BridgeService
     
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Text("🌉 Mac-Win Bridge")
-                    .font(.title)
-                    .fontWeight(.bold)
-                Spacer()
-                Circle()
-                    .fill(bridge.isConnected ? Color.green : Color.red)
-                    .frame(width: 12, height: 12)
-            }
-            .padding(.bottom, 4)
-            
-            Text(bridge.statusMessage)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 20)
-            
-            // Connection Card
-            CardView(title: "📡 接続状態") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(bridge.isConnected ? "接続済み" : "待機中",
-                              systemImage: bridge.isConnected ? "checkmark.circle.fill" : "clock")
-                            .foregroundColor(bridge.isConnected ? .green : .orange)
-                        
-                        if let host = bridge.connectedHost {
-                            Text("Windows: \(host)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    Spacer()
-                    
-                    if bridge.isConnected {
-                        Button("切断") {
-                            bridge.disconnect()
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.red)
-                    }
-                }
-            }
-            
-            // Display Mode Card
-            CardView(title: "🖥️ ディスプレイモード") {
-                HStack(spacing: 12) {
-                    ModeButton(
-                        label: "🪟 Windows",
-                        isActive: bridge.displayMode == .windows
-                    )
-                    
-                    ModeButton(
-                        label: "🍎 Mac",
-                        isActive: bridge.displayMode == .mac
-                    )
+        ScrollView {
+            VStack(spacing: 14) {
+                
+                // ── 接続ステータス ──
+                connectionCard
+                
+                // ── ディスプレイモード ──
+                displayCard
+                
+                // ── 映像配信 (Macモード時) ──
+                if service.displayMode == .mac {
+                    videoStreamCard
                 }
                 
-                Text("現在: \(bridge.displayMode == .mac ? "Macモード" : "Windowsモード")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.top, 4)
+                // ── 音声 ──
+                audioCard
+                
+                // ── Smart KVM ──
+                kvmCard
+                
             }
-            
-            // Audio Card
-            CardView(title: "🔊 統合オーディオ") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(bridge.audioStreaming ? "受信中" : "停止",
-                              systemImage: bridge.audioStreaming ? "speaker.wave.3.fill" : "speaker.slash")
-                            .foregroundColor(bridge.audioStreaming ? .green : .secondary)
-                        
-                        Text("Windows音声をMacでミックス再生")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
+            .padding(20)
+        }
+        .frame(minWidth: 320, idealWidth: 360, minHeight: 400)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+    
+    // MARK: - Connection Card
+    
+    private var connectionCard: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                // Status indicator
+                Circle()
+                    .fill(service.isConnected ? Color.green : Color.red)
+                    .frame(width: 12, height: 12)
+                    .overlay(
+                        Circle()
+                            .stroke(service.isConnected ? Color.green.opacity(0.4) : Color.clear, lineWidth: 3)
+                            .frame(width: 20, height: 20)
+                    )
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(service.isConnected ? "接続済み" : "未接続")
+                        .font(.headline)
+                        .foregroundColor(.primary)
                     
-                    Text("\(bridge.audioPacketsReceived) パケット")
-                        .font(.caption2)
+                    Text(service.statusMessage)
+                        .font(.caption)
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
-            }
-            
-            // KVM Card
-            CardView(title: "⌨️ Smart KVM") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(bridge.isConnected ? "待機中" : "未接続",
-                              systemImage: "keyboard")
-                            .foregroundColor(bridge.isConnected ? .blue : .secondary)
-                        
-                        Text("Windowsマウスが画面端に到達で自動切替")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                if service.isConnected {
+                    Button("切断") {
+                        service.disconnect()
                     }
-                    Spacer()
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+    }
+    
+    // MARK: - Display Card
+    
+    private var displayCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "display.2")
+                    .foregroundColor(.blue)
+                Text("ディスプレイモード")
+                    .font(.subheadline.weight(.semibold))
+                
+                Spacer()
+                
+                Text(service.displayMode == .mac ? "Mac 配信中" : "Windows")
+                    .font(.caption)
+                    .foregroundColor(service.displayMode == .mac ? .green : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule()
+                            .fill(service.displayMode == .mac
+                                  ? Color.green.opacity(0.15)
+                                  : Color.secondary.opacity(0.1))
+                    )
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+    }
+    
+    // MARK: - Video Stream Card (Mac mode)
+    
+    private var videoStreamCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "video.fill")
+                    .foregroundColor(.orange)
+                Text("映像配信")
+                    .font(.subheadline.weight(.semibold))
+                
+                Spacer()
+                
+                if service.screenStreamer.isStreaming {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 8, height: 8)
+                    Text("LIVE")
+                        .font(.caption2.weight(.bold))
+                        .foregroundColor(.red)
                 }
             }
             
-            Spacer()
+            // Stats grid
+            HStack(spacing: 16) {
+                statItem(title: "FPS", value: String(format: "%.1f", service.screenStreamer.fps))
+                Divider().frame(height: 30)
+                statItem(title: "送信", value: formatBytes(service.screenStreamer.encodedBytesPerSec) + "/s")
+                Divider().frame(height: 30)
+                statItem(title: "フレーム", value: "\(service.videoFramesSent)")
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+    }
+    
+    // MARK: - Audio Card
+    
+    private var audioCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "speaker.wave.2.fill")
+                    .foregroundColor(.purple)
+                Text("音声ストリーミング")
+                    .font(.subheadline.weight(.semibold))
+                
+                Spacer()
+                
+                Text(service.audioStreaming ? "受信中" : "停止")
+                    .font(.caption)
+                    .foregroundColor(service.audioStreaming ? .green : .secondary)
+            }
             
-            // Footer
-            Text("Mac-Win Bridge Companion v0.1.0")
+            if service.audioStreaming {
+                HStack {
+                    Text("受信パケット:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("\(service.audioPacketsReceived)")
+                        .font(.caption.monospacedDigit())
+                }
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(10)
+    }
+    
+    // MARK: - KVM Card
+    
+    private var kvmCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "keyboard.fill")
+                    .foregroundColor(.teal)
+                Text("Smart KVM")
+                    .font(.subheadline.weight(.semibold))
+                
+                Spacer()
+                
+                // Focus indicator
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(service.isFocusOnMac ? Color.green : Color.gray)
+                        .frame(width: 8, height: 8)
+                    Text(service.isFocusOnMac ? "フォーカス: Mac" : "フォーカス: Windows")
+                        .font(.caption)
+                        .foregroundColor(service.isFocusOnMac ? .green : .secondary)
+                }
+            }
+            
+            Text("画面端でWindowsのマウス/キーボードがMacに自動転送されます")
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
-        .padding(24)
-        .frame(minWidth: 420, minHeight: 500)
-    }
-}
-
-// MARK: - Subviews
-
-struct CardView<Content: View>: View {
-    let title: String
-    @ViewBuilder var content: () -> Content
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
-            
-            content()
-        }
-        .padding(16)
+        .padding(14)
         .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(12)
-        .padding(.bottom, 8)
+        .cornerRadius(10)
     }
-}
-
-struct ModeButton: View {
-    let label: String
-    let isActive: Bool
     
-    var body: some View {
-        Text(label)
-            .font(.system(size: 14, weight: .semibold))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(isActive ? Color.accentColor : Color(nsColor: .controlColor))
-            .foregroundColor(isActive ? .white : .primary)
-            .cornerRadius(8)
-    }
-}
-
-struct MenuBarView: View {
-    @EnvironmentObject var bridge: BridgeService
+    // MARK: - Helpers
     
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Circle()
-                    .fill(bridge.isConnected ? Color.green : Color.red)
-                    .frame(width: 8, height: 8)
-                Text(bridge.isConnected ? "接続済み" : "未接続")
-                    .font(.caption)
-            }
-            
-            Divider()
-            
-            if bridge.isConnected {
-                Text("ディスプレイ: \(bridge.displayMode == .mac ? "Mac" : "Windows")")
-                    .font(.caption)
-                Text("オーディオ: \(bridge.audioStreaming ? "配信中" : "停止")")
-                    .font(.caption)
-                
-                Divider()
-                
-                Button("切断") {
-                    bridge.disconnect()
-                }
-            }
-            
-            Button("終了") {
-                NSApplication.shared.terminate(nil)
-            }
+    private func statItem(title: String, value: String) -> some View {
+        VStack(spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.system(.callout, design: .monospaced).weight(.semibold))
+                .foregroundColor(.primary)
         }
-        .padding(12)
-        .frame(width: 200)
+    }
+    
+    private func formatBytes(_ bytes: Int) -> String {
+        if bytes >= 1_000_000 {
+            return String(format: "%.1f MB", Double(bytes) / 1_000_000)
+        } else if bytes >= 1000 {
+            return String(format: "%.0f KB", Double(bytes) / 1000)
+        }
+        return "\(bytes) B"
     }
 }

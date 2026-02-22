@@ -1,102 +1,127 @@
-// Mac-Win Bridge Companion: Audio mixer – receives Windows audio and mixes with Mac audio.
+// Mac-Win Bridge Companion: Audio playback mixer using AVAudioEngine.
+// Receives PCM audio from Windows and plays it through Mac speakers.
 
 import Foundation
 import AVFoundation
-import CoreAudio
 
-/// Receives PCM audio data from the Windows host and plays it back,
-/// mixing with macOS native audio output.
-class AudioMixer {
-    private var audioEngine: AVAudioEngine?
+/// Plays PCM audio received from Windows through the Mac's audio output.
+/// Uses AVAudioEngine with a jitter buffer to handle network timing variations.
+class AudioMixer: ObservableObject {
+    
+    @Published var isPlaying = false
+    @Published var volume: Float = 1.0
+    @Published var isMuted = false
+    
+    private var engine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
-    private var mixerNode: AVAudioMixerNode?
-    
     private var audioFormat: AVAudioFormat?
-    private var isRunning = false
     
-    // Buffer management
-    private let bufferQueue = DispatchQueue(label: "audio-mixer", qos: .userInteractive)
-    
-    // Default format: 48kHz, 16-bit, stereo (matches Windows side)
+    // Config
     private var sampleRate: Double = 48000
-    private var channels: UInt32 = 2
+    private var channels: AVAudioChannelCount = 2
+    private var bitsPerSample: Int = 16
     
-    /// Configure audio format based on config received from Windows.
+    // Jitter buffer
+    private let bufferQueue = DispatchQueue(label: "audio-buffer", qos: .userInteractive)
+    private var pendingBuffers: [AVAudioPCMBuffer] = []
+    private let maxPendingBuffers = 5
+    
+    // Stats
+    private var buffersPlayed: Int = 0
+    private var buffersDropped: Int = 0
+    
+    /// Configure audio format from Windows AudioConfig message.
     func configure(sampleRate: Int, channels: Int, bitsPerSample: Int) {
         self.sampleRate = Double(sampleRate)
-        self.channels = UInt32(channels)
+        self.channels = AVAudioChannelCount(channels)
+        self.bitsPerSample = bitsPerSample
+        
+        audioFormat = AVAudioFormat(
+            commonFormat: bitsPerSample == 16 ? .pcmFormatInt16 : .pcmFormatFloat32,
+            sampleRate: self.sampleRate,
+            channels: self.channels,
+            interleaved: true)
+        
+        print("[AudioMixer] Configured: \(sampleRate)Hz, \(channels)ch, \(bitsPerSample)bit")
     }
     
-    /// Start the audio playback engine.
+    /// Start the audio engine.
     func start() {
-        guard !isRunning else { return }
-        
-        audioEngine = AVAudioEngine()
+        engine = AVAudioEngine()
         playerNode = AVAudioPlayerNode()
         
-        guard let engine = audioEngine, let player = playerNode else { return }
+        guard let engine = engine, let player = playerNode, let format = audioFormat else { return }
         
-        // Create format for incoming Windows audio (16-bit PCM)
-        audioFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: sampleRate,
-            channels: channels,
-            interleaved: true
-        )
-        
-        // Attach player to engine
         engine.attach(player)
-        
-        // Connect player → main mixer (this mixes with Mac's own audio)
-        if let format = audioFormat {
-            engine.connect(player, to: engine.mainMixerNode, format: format)
-        }
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        engine.mainMixerNode.outputVolume = volume
         
         do {
             try engine.start()
             player.play()
-            isRunning = true
-            print("[AudioMixer] Engine started: \(sampleRate)Hz, \(channels)ch")
+            isPlaying = true
+            print("[AudioMixer] Started")
         } catch {
-            print("[AudioMixer] Failed to start engine: \(error)")
+            print("[AudioMixer] Failed to start: \(error)")
         }
     }
     
     /// Stop the audio engine.
     func stop() {
         playerNode?.stop()
-        audioEngine?.stop()
-        isRunning = false
+        engine?.stop()
+        engine = nil
+        playerNode = nil
+        isPlaying = false
+        print("[AudioMixer] Stopped. Played: \(buffersPlayed), Dropped: \(buffersDropped)")
     }
     
-    /// Receive and schedule a PCM audio packet from the Windows host.
-    func receiveAudioPacket(_ data: Data) {
-        guard isRunning,
-              let player = playerNode,
-              let format = audioFormat else { return }
+    /// Receive PCM audio data from network (timestamp + raw PCM).
+    func receiveAudioData(_ data: Data) {
+        guard let format = audioFormat, let player = playerNode else { return }
+        guard data.count > 8 else { return }
         
-        bufferQueue.async {
-            // Skip 8-byte timestamp header
-            guard data.count > 8 else { return }
-            let audioData = data.advanced(by: 8)
-            
-            let frameCount = UInt32(audioData.count) / (format.streamDescription.pointee.mBytesPerFrame)
-            guard frameCount > 0 else { return }
-            
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
-            buffer.frameLength = frameCount
-            
-            // Copy PCM data into the buffer
-            audioData.withUnsafeBytes { srcPtr in
-                guard let src = srcPtr.baseAddress else { return }
-                if let dest = buffer.int16ChannelData {
-                    // Interleaved: copy directly to channel 0 buffer
-                    memcpy(dest[0], src, min(audioData.count, Int(frameCount) * Int(format.streamDescription.pointee.mBytesPerFrame)))
-                }
+        // Skip timestamp (first 8 bytes)
+        let pcmData = data.dropFirst(8)
+        
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        guard bytesPerFrame > 0 else { return }
+        let frameCount = AVAudioFrameCount(pcmData.count / bytesPerFrame)
+        guard frameCount > 0 else { return }
+        
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
+        buffer.frameLength = frameCount
+        
+        // Copy PCM data into buffer
+        pcmData.withUnsafeBytes { ptr in
+            guard let baseAddr = ptr.baseAddress else { return }
+            memcpy(buffer.audioBufferList.pointee.mBuffers.mData,
+                   baseAddr, pcmData.count)
+        }
+        
+        // Simple jitter buffer: drop oldest if too many pending
+        bufferQueue.async { [self] in
+            if pendingBuffers.count >= maxPendingBuffers {
+                pendingBuffers.removeFirst()
+                buffersDropped += 1
             }
+            pendingBuffers.append(buffer)
             
             // Schedule buffer for playback
-            player.scheduleBuffer(buffer, completionHandler: nil)
+            player.scheduleBuffer(buffer)
+            buffersPlayed += 1
         }
+    }
+    
+    /// Set volume (0.0 – 1.0).
+    func setVolume(_ vol: Float) {
+        volume = max(0, min(1, vol))
+        engine?.mainMixerNode.outputVolume = isMuted ? 0 : volume
+    }
+    
+    /// Toggle mute.
+    func toggleMute() {
+        isMuted.toggle()
+        engine?.mainMixerNode.outputVolume = isMuted ? 0 : volume
     }
 }

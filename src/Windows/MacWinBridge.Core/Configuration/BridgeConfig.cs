@@ -1,12 +1,15 @@
-// Mac-Win Bridge: Application configuration model.
+// Mac-Win Bridge: Application configuration.
+// JSON-based settings stored in %APPDATA%\MacWinBridge\config.json.
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 
 namespace MacWinBridge.Core.Configuration;
 
 /// <summary>
-/// Top-level configuration saved to %APPDATA%\MacWinBridge\config.json
+/// Root configuration for the Mac-Win Bridge application.
+/// Loaded from / saved to JSON on disk.
 /// </summary>
 public sealed class BridgeConfig
 {
@@ -14,133 +17,165 @@ public sealed class BridgeConfig
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MacWinBridge");
     private static readonly string ConfigPath = Path.Combine(ConfigDir, "config.json");
 
-    // ── Connection ──────────────────────────────────────
-    public string MacHost { get; set; } = "auto";          // "auto" = mDNS discovery, or IP
-    public int ControlPort { get; set; } = 42100;
-    public int VideoPort { get; set; } = 42101;
-    public int AudioPort { get; set; } = 42102;
-
-    // ── Display ─────────────────────────────────────────
-    public DisplayConfig Display { get; set; } = new();
-
-    // ── Audio ───────────────────────────────────────────
-    public AudioConfig Audio { get; set; } = new();
-
-    // ── Input / KVM ─────────────────────────────────────
-    public InputConfig Input { get; set; } = new();
-
-    // ── Persistence ─────────────────────────────────────
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public static BridgeConfig Load()
-    {
-        if (!File.Exists(ConfigPath))
-            return new BridgeConfig();
+    // ── Connection ───────────────────────────────────
+    public string MacHost { get; set; } = "auto";
+    public int ControlPort { get; set; } = 42100;
+    public int VideoPort   { get; set; } = 42101;
+    public int AudioPort   { get; set; } = 42102;
 
-        var json = File.ReadAllText(ConfigPath);
-        return JsonSerializer.Deserialize<BridgeConfig>(json, JsonOpts) ?? new BridgeConfig();
+    // ── Sub-configs ──────────────────────────────────
+    public DisplayConfig Display { get; set; } = new();
+    public AudioConfig   Audio   { get; set; } = new();
+    public InputConfig   Input   { get; set; } = new();
+
+    // ── Load / Save ──────────────────────────────────
+
+    public static BridgeConfig Load(ILogger? logger = null)
+    {
+        try
+        {
+            if (File.Exists(ConfigPath))
+            {
+                var json = File.ReadAllText(ConfigPath);
+                var cfg = JsonSerializer.Deserialize<BridgeConfig>(json, JsonOpts);
+                if (cfg is not null)
+                {
+                    logger?.LogInformation("Config loaded from {Path}", ConfigPath);
+                    return cfg;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Failed to load config, using defaults");
+        }
+
+        var defaultCfg = new BridgeConfig();
+        defaultCfg.Save(logger);
+        return defaultCfg;
     }
 
-    public void Save()
+    public void Save(ILogger? logger = null)
     {
-        Directory.CreateDirectory(ConfigDir);
-        var json = JsonSerializer.Serialize(this, JsonOpts);
-        File.WriteAllText(ConfigPath, json);
+        try
+        {
+            Directory.CreateDirectory(ConfigDir);
+            var json = JsonSerializer.Serialize(this, JsonOpts);
+            File.WriteAllText(ConfigPath, json);
+            logger?.LogInformation("Config saved to {Path}", ConfigPath);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Failed to save config");
+        }
     }
 }
+
+// ── Display ──────────────────────────────────────────
 
 public sealed class DisplayConfig
 {
-    /// <summary>Zero-based index of the monitor used as the "switchable" display.</summary>
-    public int TargetMonitorIndex { get; set; } = 1;
+    /// <summary>Index of the target monitor (0-based). -1 = auto-detect secondary.</summary>
+    public int TargetMonitor { get; set; } = -1;
 
-    /// <summary>Current active mode.</summary>
-    public DisplayMode Mode { get; set; } = DisplayMode.Windows;
+    /// <summary>Alias for TargetMonitor (used by UI layer).</summary>
+    [JsonIgnore]
+    public int TargetMonitorIndex
+    {
+        get => TargetMonitor;
+        set => TargetMonitor = value;
+    }
 
-    /// <summary>Encoder to use for streaming to Mac.</summary>
-    public VideoCodec Codec { get; set; } = VideoCodec.H264;
+    /// <summary>Current display mode persisted across sessions.</summary>
+    public DisplayModeSetting Mode { get; set; } = DisplayModeSetting.Windows;
 
-    /// <summary>Target bitrate in Mbps.</summary>
-    public int BitrateMbps { get; set; } = 30;
-
-    /// <summary>Max FPS for capture.</summary>
-    public int MaxFps { get; set; } = 60;
+    // Video quality (requested from Mac encoder)
+    public VideoCodecSetting Codec   { get; set; } = VideoCodecSetting.H264;
+    public int  Bitrate              { get; set; } = 20_000_000;  // 20 Mbps default
+    public int  Fps                  { get; set; } = 60;
+    public string Profile            { get; set; } = "Main";
+    public int  GopSize              { get; set; } = 30;          // keyframe every 30 frames
+    public QualityPreset Quality     { get; set; } = QualityPreset.Balanced;
 }
 
-public sealed class AudioConfig
-{
-    public bool Enabled { get; set; } = true;
-
-    /// <summary>Sample rate for audio streaming.</summary>
-    public int SampleRate { get; set; } = 48000;
-
-    /// <summary>Number of channels (2 = stereo).</summary>
-    public int Channels { get; set; } = 2;
-
-    /// <summary>Bits per sample.</summary>
-    public int BitsPerSample { get; set; } = 16;
-
-    /// <summary>Audio buffer size in milliseconds (lower = less latency).</summary>
-    public int BufferMs { get; set; } = 10;
-
-    /// <summary>Use Opus compression for lower bandwidth.</summary>
-    public bool UseOpusCompression { get; set; } = true;
-
-    /// <summary>Audio routing direction: where to play audio.</summary>
-    public AudioRouting Routing { get; set; } = AudioRouting.WindowsToMac;
-}
-
-public sealed class InputConfig
-{
-    public bool Enabled { get; set; } = true;
-
-    /// <summary>Which screen edge triggers Mac control handoff (matches TargetMonitorIndex side).</summary>
-    public ScreenEdge TransitionEdge { get; set; } = ScreenEdge.Right;
-
-    /// <summary>Pixels of "dead zone" before handoff triggers, to prevent accidental switches.</summary>
-    public int DeadZonePixels { get; set; } = 5;
-
-    /// <summary>Enable clipboard sync between Windows and Mac.</summary>
-    public bool ClipboardSync { get; set; } = true;
-
-    /// <summary>Keyboard shortcut to force-toggle KVM mode.</summary>
-    public string ToggleHotkey { get; set; } = "Ctrl+Alt+K";
-}
-
-public enum DisplayMode
+public enum DisplayModeSetting
 {
     Windows,
     Mac,
 }
 
-public enum VideoCodec
+public enum VideoCodecSetting
 {
     H264,
     H265,
-    Raw,
 }
 
+public enum QualityPreset
+{
+    Performance,  // lower bitrate, lower latency
+    Balanced,     // default
+    Quality,      // higher bitrate, better image
+}
+
+// ── Audio ────────────────────────────────────────────
+
+public sealed class AudioConfig
+{
+    public bool Enabled             { get; set; } = true;
+    public int  SampleRate          { get; set; } = 48000;
+    public int  Channels            { get; set; } = 2;
+    public int  BitsPerSample       { get; set; } = 16;
+    public int  BufferMs            { get; set; } = 20;
+    public bool UseOpusCompression  { get; set; } = false;
+    public AudioRouting Routing     { get; set; } = AudioRouting.WindowsToMac;
+}
+
+public enum AudioRouting
+{
+    WindowsToMac,
+    MacToWindows,
+    Both,
+    Muted,
+}
+
+// ── Input / KVM ──────────────────────────────────────
+
+public sealed class InputConfig
+{
+    /// <summary>Which edge of the Windows screen triggers the switch to Mac.</summary>
+    public ScreenEdge MacEdge { get; set; } = ScreenEdge.Right;
+
+    /// <summary>
+    /// Vertical (or horizontal) offset of the Mac screen along the trigger edge,
+    /// expressed as a percentage (0.0 = top/left, 1.0 = bottom/right).
+    /// Used for coordinate mapping when monitors have different resolutions.
+    /// </summary>
+    public double MacEdgeOffset { get; set; } = 0.0;
+
+    /// <summary>Dead zone in pixels at the edge before triggering the switch.</summary>
+    public int DeadZonePx { get; set; } = 2;
+
+    /// <summary>Enable clipboard synchronization between Windows and Mac.</summary>
+    public bool ClipboardSync { get; set; } = false;
+
+    /// <summary>Hotkey to force-toggle KVM focus (emergency escape). Format: "Ctrl+Alt+K".</summary>
+    public string ForceToggleHotkey { get; set; } = "Ctrl+Alt+K";
+}
+
+/// <summary>
+/// Which edge of the primary Windows monitor the virtual Mac display is placed at.
+/// </summary>
 public enum ScreenEdge
 {
     Left,
     Right,
     Top,
     Bottom,
-}
-
-/// <summary>
-/// Audio routing direction.
-/// </summary>
-public enum AudioRouting
-{
-    /// <summary>Windows audio plays on Mac speakers.</summary>
-    WindowsToMac,
-    /// <summary>Mac audio plays on Windows speakers.</summary>
-    MacToWindows,
-    /// <summary>Audio plays on both devices simultaneously.</summary>
-    Both,
 }

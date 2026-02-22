@@ -1,4 +1,7 @@
+using System;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 using MacWinBridge.App.Services;
 using MacWinBridge.Core.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,6 +18,11 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // ── グローバル例外ハンドリング ──
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+        AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
 
         // Load configuration
         Config = BridgeConfig.Load();
@@ -45,6 +53,29 @@ public partial class App : Application
         // Show main window
         var mainWindow = new MainWindow(this);
         mainWindow.Show();
+
+        AppLogger.Info("Mac-Win Bridge 起動完了");
+    }
+
+    private void OnDispatcherUnhandledException(object sender,
+        DispatcherUnhandledExceptionEventArgs e)
+    {
+        AppLogger.Error($"UI例外: {e.Exception.GetType().Name}: {e.Exception.Message}");
+        e.Handled = true;  // アプリを落とさない
+    }
+
+    private void OnUnobservedTaskException(object? sender,
+        UnobservedTaskExceptionEventArgs e)
+    {
+        AppLogger.Error($"Task例外: {e.Exception?.InnerException?.Message ?? e.Exception?.Message}");
+        e.SetObserved();
+    }
+
+    private void OnUnhandledException(object sender,
+        UnhandledExceptionEventArgs e)
+    {
+        if (e.ExceptionObject is Exception ex)
+            AppLogger.Error($"致命的例外: {ex.GetType().Name}: {ex.Message}");
     }
 
     protected override void OnExit(ExitEventArgs e)

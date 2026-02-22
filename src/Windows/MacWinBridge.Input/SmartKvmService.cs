@@ -1,345 +1,298 @@
 // Mac-Win Bridge: Smart KVM service.
-// Detects when mouse crosses to the second monitor and forwards input to Mac.
+// Manages transparent cursor traversal between Windows (1st monitor) and Mac (2nd monitor).
+// Single isFocusOnMac state drives both mouse and keyboard routing.
 
 using System.Runtime.InteropServices;
 using MacWinBridge.Core.Configuration;
 using MacWinBridge.Core.Protocol;
 using MacWinBridge.Core.Transport;
-using MacWinBridge.Input.Hooks;
+using MacWinBridge.Display.Monitor;
 using Microsoft.Extensions.Logging;
 
 namespace MacWinBridge.Input;
 
 /// <summary>
-/// The Smart KVM service manages seamless input switching between Windows and Mac.
-/// 
-/// When the mouse reaches the edge of the designated monitor, input is redirected
-/// to the Mac companion. The mouse cursor is "captured" at the screen edge on Windows,
-/// while the Mac receives relative mouse movements.
+/// Transparent dual-display KVM: cursor crossing the configured edge
+/// seamlessly transfers both mouse and keyboard to Mac.
 /// </summary>
-public sealed class SmartKvmService : IDisposable
+public sealed class SmartKvmService : IAsyncDisposable
 {
     private readonly ILogger<SmartKvmService> _logger;
     private readonly BridgeConfig _config;
     private readonly BridgeTransport _controlTransport;
-    private readonly GlobalInputHook _hook;
+    private readonly GlobalInputHook _inputHook;
 
-    private bool _macControlActive;
-    private int _edgeX, _edgeY, _edgeLength;
-    private bool _isVerticalEdge;
-    private int _lastMacX, _lastMacY;
-    private int _monitorWidth, _monitorHeight;
+    private bool _isActive;
+    private bool _isFocusOnMac;
 
-    // Win32 for cursor control
-    [DllImport("user32.dll")]
-    private static extern bool SetCursorPos(int x, int y);
+    // Screen geometry
+    private int _winPrimaryLeft, _winPrimaryTop, _winPrimaryRight, _winPrimaryBottom;
+    private int _macWidth, _macHeight;
+    private int _macScaleFactor = 100;
 
-    [DllImport("user32.dll")]
-    private static extern bool ClipCursor(ref RECT lpRect);
+    public bool IsActive      => _isActive;
+    public bool IsFocusOnMac  => _isFocusOnMac;
 
-    [DllImport("user32.dll")]
-    private static extern bool ClipCursor(IntPtr lpRect);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
-
-    public bool IsMacControlActive => _macControlActive;
-    public event EventHandler<bool>? MacControlChanged;
+    public event EventHandler<bool>? FocusChanged;  // true = Mac, false = Windows
 
     public SmartKvmService(
         ILogger<SmartKvmService> logger,
         BridgeConfig config,
-        BridgeTransport controlTransport)
+        BridgeTransport controlTransport,
+        GlobalInputHook inputHook)
     {
         _logger = logger;
         _config = config;
         _controlTransport = controlTransport;
-        _hook = new GlobalInputHook(logger as ILogger<GlobalInputHook>
-            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<GlobalInputHook>.Instance);
+        _inputHook = inputHook;
     }
 
     /// <summary>
-    /// Start the Smart KVM service.
+    /// Start the KVM service: install hooks and begin edge detection.
     /// </summary>
-    public void Start()
+    public void Start(int macWidth, int macHeight, int macScale = 100)
     {
-        if (!_config.Input.Enabled)
-        {
-            _logger.LogInformation("Smart KVM is disabled in config");
-            return;
-        }
+        _macWidth = macWidth;
+        _macHeight = macHeight;
+        _macScaleFactor = macScale;
 
-        // Calculate the transition edge based on config
-        CalculateTransitionEdge();
+        // Get primary monitor geometry
+        var monitors = MonitorManager.GetMonitors();
+        var primary = monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors.First();
+        _winPrimaryLeft   = primary.Left;
+        _winPrimaryTop    = primary.Top;
+        _winPrimaryRight  = primary.Left + primary.Width;
+        _winPrimaryBottom = primary.Top + primary.Height;
 
-        // Install global hooks
-        _hook.MouseEvent += OnMouseEvent;
-        _hook.KeyboardEvent += OnKeyboardEvent;
-        _hook.Install();
+        // Wire up hook events
+        _inputHook.MouseMoved       += OnMouseMoved;
+        _inputHook.MouseButtonAction += OnMouseButton;
+        _inputHook.MouseScrolled    += OnMouseScrolled;
+        _inputHook.KeyPressed       += OnKeyPressed;
+        _inputHook.KeyReleased      += OnKeyReleased;
+        _inputHook.EdgeCrossed      += OnForceToggle;
 
-        _logger.LogInformation("Smart KVM started. Transition edge: {Edge} at ({X},{Y}), length={Len}",
-            _config.Input.TransitionEdge, _edgeX, _edgeY, _edgeLength);
+        // Listen for CursorReturn from Mac
+        _controlTransport.MessageReceived += OnControlMessage;
+
+        _inputHook.Install();
+        _isActive = true;
+
+        _logger.LogInformation("KVM started: edge={Edge}, Win primary={W}x{H}, Mac={MW}x{MH}",
+            _config.Input.MacEdge, primary.Width, primary.Height, macWidth, macHeight);
     }
 
-    /// <summary>
-    /// Stop the Smart KVM service.
-    /// </summary>
     public void Stop()
     {
-        _hook.MouseEvent -= OnMouseEvent;
-        _hook.KeyboardEvent -= OnKeyboardEvent;
-        _hook.Uninstall();
+        _inputHook.MouseMoved       -= OnMouseMoved;
+        _inputHook.MouseButtonAction -= OnMouseButton;
+        _inputHook.MouseScrolled    -= OnMouseScrolled;
+        _inputHook.KeyPressed       -= OnKeyPressed;
+        _inputHook.KeyReleased      -= OnKeyReleased;
+        _inputHook.EdgeCrossed      -= OnForceToggle;
+        _controlTransport.MessageReceived -= OnControlMessage;
 
-        if (_macControlActive)
-            DeactivateMacControl();
+        _inputHook.Uninstall();
+        ReleaseCursor();
+        _isActive = false;
 
-        _logger.LogInformation("Smart KVM stopped");
+        _logger.LogInformation("KVM stopped");
     }
 
-    /// <summary>
-    /// Force toggle between Windows and Mac control.
-    /// </summary>
-    public void ToggleControl()
+    // ── Edge Detection & Focus Management ────────────
+
+    private void OnMouseMoved(int x, int y)
     {
-        if (_macControlActive)
-            DeactivateMacControl();
+        if (!_isFocusOnMac)
+        {
+            // Check if cursor crossed the configured edge
+            if (ShouldSwitchToMac(x, y))
+            {
+                SwitchToMac(x, y);
+            }
+        }
         else
-            ActivateMacControl();
-    }
-
-    private void CalculateTransitionEdge()
-    {
-        // Get monitor info (we need the display module's MonitorManager)
-        // For now, use a simplified approach based on screen bounds
-        var screens = System.Windows.Forms.Screen.AllScreens;
-        var targetIndex = Math.Min(_config.Display.TargetMonitorIndex, screens.Length - 1);
-        var targetScreen = screens[targetIndex];
-
-        _monitorWidth = targetScreen.Bounds.Width;
-        _monitorHeight = targetScreen.Bounds.Height;
-
-        var edge = _config.Input.TransitionEdge;
-        switch (edge)
         {
-            case ScreenEdge.Right:
-                _edgeX = targetScreen.Bounds.Right - 1;
-                _edgeY = targetScreen.Bounds.Top;
-                _edgeLength = targetScreen.Bounds.Height;
-                _isVerticalEdge = true;
-                break;
-            case ScreenEdge.Left:
-                _edgeX = targetScreen.Bounds.Left;
-                _edgeY = targetScreen.Bounds.Top;
-                _edgeLength = targetScreen.Bounds.Height;
-                _isVerticalEdge = true;
-                break;
-            case ScreenEdge.Top:
-                _edgeX = targetScreen.Bounds.Left;
-                _edgeY = targetScreen.Bounds.Top;
-                _edgeLength = targetScreen.Bounds.Width;
-                _isVerticalEdge = false;
-                break;
-            case ScreenEdge.Bottom:
-                _edgeX = targetScreen.Bounds.Left;
-                _edgeY = targetScreen.Bounds.Bottom - 1;
-                _edgeLength = targetScreen.Bounds.Width;
-                _isVerticalEdge = false;
-                break;
+            // Already on Mac: forward mouse position (scaled to Mac coordinates)
+            var (macX, macY) = ScaleToMac(x, y);
+            SendMouseMove(macX, macY);
         }
     }
 
-    private void OnMouseEvent(object? sender, MouseHookEventArgs e)
+    private bool ShouldSwitchToMac(int x, int y)
     {
-        if (_macControlActive)
+        var dz = _config.Input.DeadZonePx;
+        return _config.Input.MacEdge switch
         {
-            // When Mac control is active, capture all mouse events
-            HandleMacMouseEvent(e);
-            return;
-        }
-
-        // Check if cursor hit the transition edge
-        if (e.Action == MouseHookAction.Move && IsAtTransitionEdge(e.X, e.Y))
-        {
-            ActivateMacControl();
-            e.Handled = true;
-        }
-    }
-
-    private void OnKeyboardEvent(object? sender, KeyboardHookEventArgs e)
-    {
-        // Check for toggle hotkey (Ctrl+Alt+K by default)
-        if (IsToggleHotkey(e))
-        {
-            if (e.IsKeyDown)
-                ToggleControl();
-            e.Handled = true;
-            return;
-        }
-
-        if (_macControlActive)
-        {
-            // Forward keyboard events to Mac
-            ForwardKeyboardEvent(e);
-            e.Handled = true;
-        }
-    }
-
-    private bool IsAtTransitionEdge(int x, int y)
-    {
-        var deadZone = _config.Input.DeadZonePixels;
-
-        return _config.Input.TransitionEdge switch
-        {
-            ScreenEdge.Right => x >= _edgeX - deadZone
-                && y >= _edgeY && y < _edgeY + _edgeLength,
-            ScreenEdge.Left => x <= _edgeX + deadZone
-                && y >= _edgeY && y < _edgeY + _edgeLength,
-            ScreenEdge.Top => y <= _edgeY + deadZone
-                && x >= _edgeX && x < _edgeX + _edgeLength,
-            ScreenEdge.Bottom => y >= _edgeY - deadZone
-                && x >= _edgeX && x < _edgeX + _edgeLength,
+            ScreenEdge.Right  => x >= _winPrimaryRight - dz,
+            ScreenEdge.Left   => x <= _winPrimaryLeft + dz,
+            ScreenEdge.Top    => y <= _winPrimaryTop + dz,
+            ScreenEdge.Bottom => y >= _winPrimaryBottom - dz,
             _ => false,
         };
     }
 
-    private void ActivateMacControl()
+    private void SwitchToMac(int winX, int winY)
     {
-        _macControlActive = true;
-        _lastMacX = _monitorWidth / 2;
-        _lastMacY = _monitorHeight / 2;
+        _isFocusOnMac = true;
+        _inputHook.IsFocusOnMac = true;
 
-        // Lock cursor to the edge area on Windows
-        var clipRect = new RECT
+        // Clip and hide Windows cursor
+        ClipCursor();
+        ShowCursor(false);
+
+        // Calculate Mac entry point
+        var (macX, macY) = CalculateEntryPoint(winX, winY);
+        SendMouseMove(macX, macY);
+
+        FocusChanged?.Invoke(this, true);
+        _logger.LogDebug("Focus → Mac (entry: {X},{Y})", macX, macY);
+    }
+
+    private void SwitchToWindows()
+    {
+        _isFocusOnMac = false;
+        _inputHook.IsFocusOnMac = false;
+
+        // Release cursor
+        ReleaseCursor();
+        ShowCursor(true);
+
+        FocusChanged?.Invoke(this, false);
+        _logger.LogDebug("Focus → Windows");
+    }
+
+    private void OnForceToggle()
+    {
+        if (_isFocusOnMac)
+            SwitchToWindows();
+        else
+            SwitchToMac(_winPrimaryRight, (_winPrimaryTop + _winPrimaryBottom) / 2);
+    }
+
+    // ── Coordinate Mapping ───────────────────────────
+
+    private (int macX, int macY) CalculateEntryPoint(int winX, int winY)
+    {
+        var offset = _config.Input.MacEdgeOffset;
+        return _config.Input.MacEdge switch
         {
-            Left = _edgeX - 2,
-            Top = _edgeY,
-            Right = _edgeX + 2,
-            Bottom = _edgeY + _edgeLength,
+            ScreenEdge.Right => (
+                0, // Enter from Mac's left edge
+                (int)((double)(winY - _winPrimaryTop) / (_winPrimaryBottom - _winPrimaryTop) * _macHeight)
+            ),
+            ScreenEdge.Left => (
+                _macWidth - 1, // Enter from Mac's right edge
+                (int)((double)(winY - _winPrimaryTop) / (_winPrimaryBottom - _winPrimaryTop) * _macHeight)
+            ),
+            ScreenEdge.Top => (
+                (int)((double)(winX - _winPrimaryLeft) / (_winPrimaryRight - _winPrimaryLeft) * _macWidth),
+                _macHeight - 1 // Enter from Mac's bottom edge
+            ),
+            ScreenEdge.Bottom => (
+                (int)((double)(winX - _winPrimaryLeft) / (_winPrimaryRight - _winPrimaryLeft) * _macWidth),
+                0 // Enter from Mac's top edge
+            ),
+            _ => (0, 0),
         };
-        ClipCursor(ref clipRect);
-
-        // Notify Mac to activate cursor
-        var payload = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
-        {
-            Active = true,
-            InitialX = _lastMacX,
-            InitialY = _lastMacY,
-        });
-        _ = _controlTransport.SendAsync(MessageType.MouseMove, payload);
-
-        MacControlChanged?.Invoke(this, true);
-        _logger.LogInformation("Mac control activated");
     }
 
-    private void DeactivateMacControl()
+    private (int macX, int macY) ScaleToMac(int winX, int winY)
     {
-        _macControlActive = false;
-
-        // Release cursor clip
-        ClipCursor(IntPtr.Zero);
-
-        MacControlChanged?.Invoke(this, false);
-        _logger.LogInformation("Mac control deactivated");
+        // Scale Windows cursor position to Mac coordinate space
+        double relX = (double)(winX - _winPrimaryLeft) / (_winPrimaryRight - _winPrimaryLeft);
+        double relY = (double)(winY - _winPrimaryTop) / (_winPrimaryBottom - _winPrimaryTop);
+        return ((int)(relX * _macWidth), (int)(relY * _macHeight));
     }
 
-    private void HandleMacMouseEvent(MouseHookEventArgs e)
-    {
-        e.Handled = true;
+    // ── Input Forwarding ─────────────────────────────
 
-        switch (e.Action)
-        {
-            case MouseHookAction.Move:
-                // Check if mouse moved back towards Windows
-                var movedBack = _config.Input.TransitionEdge switch
-                {
-                    ScreenEdge.Right => e.X < _edgeX - _config.Input.DeadZonePixels * 2,
-                    ScreenEdge.Left => e.X > _edgeX + _config.Input.DeadZonePixels * 2,
-                    ScreenEdge.Top => e.Y > _edgeY + _config.Input.DeadZonePixels * 2,
-                    ScreenEdge.Bottom => e.Y < _edgeY - _config.Input.DeadZonePixels * 2,
-                    _ => false,
-                };
-
-                if (movedBack)
-                {
-                    DeactivateMacControl();
-                    return;
-                }
-
-                // Send relative mouse movement to Mac
-                ForwardMouseMove(e.X, e.Y);
-                break;
-
-            case MouseHookAction.LeftDown:
-            case MouseHookAction.LeftUp:
-            case MouseHookAction.RightDown:
-            case MouseHookAction.RightUp:
-            case MouseHookAction.MiddleDown:
-            case MouseHookAction.MiddleUp:
-                ForwardMouseButton(e.Action);
-                break;
-
-            case MouseHookAction.Wheel:
-            case MouseHookAction.HWheel:
-                ForwardMouseScroll(e.Action, e.WheelDelta);
-                break;
-        }
-    }
-
-    private void ForwardMouseMove(int screenX, int screenY)
+    private async void SendMouseMove(int x, int y)
     {
         var payload = new byte[8];
-        BitConverter.GetBytes(screenX).CopyTo(payload, 0);
-        BitConverter.GetBytes(screenY).CopyTo(payload, 4);
-        _ = _controlTransport.SendAsync(MessageType.MouseMove, payload, MessageFlags.Priority);
+        BitConverter.TryWriteBytes(payload.AsSpan(0, 4), x);
+        BitConverter.TryWriteBytes(payload.AsSpan(4, 4), y);
+        try { await _controlTransport.SendAsync(MessageType.MouseMove, payload); }
+        catch { }
     }
 
-    private void ForwardMouseButton(MouseHookAction action)
+    private async void OnMouseButton(int action)
     {
+        if (!_isFocusOnMac) return;
         var payload = new byte[4];
-        BitConverter.GetBytes((int)action).CopyTo(payload, 0);
-        _ = _controlTransport.SendAsync(MessageType.MouseButton, payload, MessageFlags.Priority);
+        BitConverter.TryWriteBytes(payload.AsSpan(0, 4), action);
+        try { await _controlTransport.SendAsync(MessageType.MouseButton, payload); }
+        catch { }
     }
 
-    private void ForwardMouseScroll(MouseHookAction action, int delta)
+    private async void OnMouseScrolled(int dx, int dy)
     {
+        if (!_isFocusOnMac) return;
         var payload = new byte[8];
-        BitConverter.GetBytes(action == MouseHookAction.HWheel ? 1 : 0).CopyTo(payload, 0);
-        BitConverter.GetBytes(delta).CopyTo(payload, 4);
-        _ = _controlTransport.SendAsync(MessageType.MouseScroll, payload, MessageFlags.Priority);
+        BitConverter.TryWriteBytes(payload.AsSpan(0, 4), dx);
+        BitConverter.TryWriteBytes(payload.AsSpan(4, 4), dy);
+        try { await _controlTransport.SendAsync(MessageType.MouseScroll, payload); }
+        catch { }
     }
 
-    private void ForwardKeyboardEvent(KeyboardHookEventArgs e)
+    private async void OnKeyPressed(int vkCode)
     {
-        var type = e.IsKeyDown ? MessageType.KeyDown : MessageType.KeyUp;
-        var payload = new byte[12];
-        BitConverter.GetBytes(e.VirtualKeyCode).CopyTo(payload, 0);
-        BitConverter.GetBytes(e.ScanCode).CopyTo(payload, 4);
-        BitConverter.GetBytes(e.IsExtendedKey ? 1 : 0).CopyTo(payload, 8);
-        _ = _controlTransport.SendAsync(type, payload, MessageFlags.Priority);
+        if (!_isFocusOnMac) return;
+        var payload = new byte[4];
+        BitConverter.TryWriteBytes(payload.AsSpan(0, 4), vkCode);
+        try { await _controlTransport.SendAsync(MessageType.KeyDown, payload); }
+        catch { }
     }
 
-    private bool IsToggleHotkey(KeyboardHookEventArgs e)
+    private async void OnKeyReleased(int vkCode)
     {
-        // Default: Ctrl+Alt+K (VK_K = 0x4B)
-        // Check if all modifiers are held + the key matches
-        if (e.VirtualKeyCode == 0x4B) // 'K'
+        if (!_isFocusOnMac) return;
+        var payload = new byte[4];
+        BitConverter.TryWriteBytes(payload.AsSpan(0, 4), vkCode);
+        try { await _controlTransport.SendAsync(MessageType.KeyUp, payload); }
+        catch { }
+    }
+
+    // ── CursorReturn handler ─────────────────────────
+
+    private void OnControlMessage(object? sender, Core.Transport.MessageReceivedEventArgs e)
+    {
+        if (e.Header.Type == MessageType.CursorReturn)
         {
-            var ctrlDown = (GetAsyncKeyState(0xA2) & 0x8000) != 0  // VK_LCONTROL
-                        || (GetAsyncKeyState(0xA3) & 0x8000) != 0; // VK_RCONTROL
-            var altDown = (GetAsyncKeyState(0xA4) & 0x8000) != 0   // VK_LMENU
-                       || (GetAsyncKeyState(0xA5) & 0x8000) != 0;  // VK_RMENU
-
-            return ctrlDown && altDown;
+            SwitchToWindows();
         }
-        return false;
     }
 
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
+    // ── Win32 cursor management ──────────────────────
 
-    public void Dispose()
+    private void ClipCursor()
+    {
+        // Clip cursor to primary monitor area (prevent it from going to 2nd monitor)
+        var rect = new RECT
+        {
+            Left   = _winPrimaryLeft,
+            Top    = _winPrimaryTop,
+            Right  = _winPrimaryRight,
+            Bottom = _winPrimaryBottom,
+        };
+        ClipCursorRect(ref rect);
+    }
+
+    private void ReleaseCursor()
+    {
+        ClipCursorRect(IntPtr.Zero);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll", EntryPoint = "ClipCursor")] private static extern bool ClipCursorRect(ref RECT rect);
+    [DllImport("user32.dll", EntryPoint = "ClipCursor")] private static extern bool ClipCursorRect(IntPtr rect);
+    [DllImport("user32.dll")] private static extern int ShowCursor(bool bShow);
+
+    public ValueTask DisposeAsync()
     {
         Stop();
-        _hook.Dispose();
+        return ValueTask.CompletedTask;
     }
 }

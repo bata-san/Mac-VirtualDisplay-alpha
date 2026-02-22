@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Mac-Win Bridge"
-        Width="380" Height="540"
+        Width="380" Height="580"
         MinWidth="340" MinHeight="460"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource SurfaceBrush}"
@@ -149,43 +149,100 @@
 
         <!-- ── ディスプレイ切替 ── -->
         <Border Style="{StaticResource CardBorder}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Column="0" Text="🖥️"
-                           FontSize="18" VerticalAlignment="Center"
-                           Margin="0,0,10,0" />
+                    <TextBlock Grid.Column="0" Text="🖥️"
+                               FontSize="18" VerticalAlignment="Center"
+                               Margin="0,0,10,0" />
 
-                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                    <TextBlock Text="ディスプレイ"
-                               FontSize="13" FontWeight="SemiBold"
-                               Foreground="{StaticResource TextBrush}" />
-                    <TextBlock x:Name="DisplayModeText"
-                               Text="Windowsモード"
-                               FontSize="11"
-                               Foreground="{StaticResource TextMutedBrush}" />
-                </StackPanel>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="ディスプレイ"
+                                   FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextBrush}" />
+                        <TextBlock x:Name="DisplayModeText"
+                                   Text="Windowsモード"
+                                   FontSize="11"
+                                   Foreground="{StaticResource TextMutedBrush}" />
+                    </StackPanel>
 
-                <Button x:Name="WindowsModeButton"
-                        Grid.Column="2"
-                        Content="🪟"
-                        Style="{StaticResource IconButton}"
-                        Click="OnWindowsModeClick"
-                        Margin="0,0,6,0"
-                        ToolTip="Windowsモード" />
+                    <Button x:Name="WindowsModeButton"
+                            Grid.Column="2"
+                            Content="🪟"
+                            Style="{StaticResource IconButton}"
+                            Click="OnWindowsModeClick"
+                            Margin="0,0,6,0"
+                            ToolTip="Windowsモード" />
 
-                <Button x:Name="MacModeButton"
-                        Grid.Column="3"
-                        Content="🍎"
-                        Style="{StaticResource IconButton}"
-                        Click="OnMacModeClick"
-                        ToolTip="Macモード" />
-            </Grid>
+                    <Button x:Name="MacModeButton"
+                            Grid.Column="3"
+                            Content="🍎"
+                            Style="{StaticResource IconButton}"
+                            Click="OnMacModeClick"
+                            ToolTip="Macモード" />
+                </Grid>
+
+                <!-- ── 映像統計 (Macモード時のみ表示) ── -->
+                <Border x:Name="VideoStatsPanel"
+                        Visibility="Collapsed"
+                        Background="#1A1A2E"
+                        CornerRadius="8"
+                        Padding="12,8"
+                        Margin="0,10,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition />
+                            <RowDefinition />
+                        </Grid.RowDefinitions>
+
+                        <!-- FPS -->
+                        <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,0,4">
+                            <TextBlock Text="FPS" FontSize="10"
+                                       Foreground="{StaticResource TextMutedBrush}" />
+                            <TextBlock x:Name="StatsFps" Text="—"
+                                       FontSize="16" FontWeight="Bold"
+                                       Foreground="{StaticResource TextBrush}" />
+                        </StackPanel>
+
+                        <!-- デコード遅延 -->
+                        <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,0,0,4">
+                            <TextBlock Text="デコード遅延" FontSize="10"
+                                       Foreground="{StaticResource TextMutedBrush}" />
+                            <TextBlock x:Name="StatsDecodeMs" Text="—"
+                                       FontSize="16" FontWeight="Bold"
+                                       Foreground="{StaticResource TextBrush}" />
+                        </StackPanel>
+
+                        <!-- 解像度 -->
+                        <StackPanel Grid.Row="1" Grid.Column="0">
+                            <TextBlock Text="解像度" FontSize="10"
+                                       Foreground="{StaticResource TextMutedBrush}" />
+                            <TextBlock x:Name="StatsResolution" Text="—"
+                                       FontSize="14"
+                                       Foreground="{StaticResource TextBrush}" />
+                        </StackPanel>
+
+                        <!-- 帯域 -->
+                        <StackPanel Grid.Row="1" Grid.Column="1">
+                            <TextBlock Text="帯域" FontSize="10"
+                                       Foreground="{StaticResource TextMutedBrush}" />
+                            <TextBlock x:Name="StatsBandwidth" Text="—"
+                                       FontSize="14"
+                                       Foreground="{StaticResource TextBrush}" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </StackPanel>
         </Border>
 
         <!-- ── 音声ルーティング ── -->
@@ -240,33 +297,64 @@
 
         <!-- ── Smart KVM ── -->
         <Border Style="{StaticResource CardBorder}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Column="0" Text="⌨️"
-                           FontSize="18" VerticalAlignment="Center"
-                           Margin="0,0,10,0" />
+                    <TextBlock Grid.Column="0" Text="⌨️"
+                               FontSize="18" VerticalAlignment="Center"
+                               Margin="0,0,10,0" />
 
-                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                    <TextBlock Text="Smart KVM"
-                               FontSize="13" FontWeight="SemiBold"
-                               Foreground="{StaticResource TextBrush}" />
-                    <TextBlock Text="画面端でMac操作に自動切替"
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="Smart KVM"
+                                   FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextBrush}" />
+                        <TextBlock x:Name="KvmSubText"
+                                   Text="画面端でMac操作に自動切替"
+                                   FontSize="11"
+                                   Foreground="{StaticResource TextMutedBrush}" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="KvmStatusText"
+                               Grid.Column="2"
+                               Text="停止"
+                               FontSize="12"
+                               Foreground="{StaticResource TextMutedBrush}"
+                               VerticalAlignment="Center" />
+                </Grid>
+
+                <!-- KVM エッジ選択 -->
+                <Grid Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Text="Mac 画面の位置:"
                                FontSize="11"
-                               Foreground="{StaticResource TextMutedBrush}" />
-                </StackPanel>
+                               Foreground="{StaticResource TextMutedBrush}"
+                               VerticalAlignment="Center"
+                               Margin="0,0,10,0" />
 
-                <TextBlock x:Name="KvmStatusText"
-                           Grid.Column="2"
-                           Text="停止"
-                           FontSize="12"
-                           Foreground="{StaticResource TextMutedBrush}"
-                           VerticalAlignment="Center" />
-            </Grid>
+                    <ComboBox x:Name="MacEdgeCombo"
+                              Grid.Column="1"
+                              FontSize="12"
+                              Background="#252540"
+                              Foreground="{StaticResource TextBrush}"
+                              BorderThickness="0"
+                              Padding="8,5"
+                              SelectionChanged="OnMacEdgeChanged">
+                        <ComboBoxItem Content="← 左" Tag="Left" />
+                        <ComboBoxItem Content="→ 右" Tag="Right" />
+                        <ComboBoxItem Content="↑ 上" Tag="Top" />
+                        <ComboBoxItem Content="↓ 下" Tag="Bottom" />
+                    </ComboBox>
+                </Grid>
+            </StackPanel>
         </Border>
 
         <!-- ── USB-C / Thunderbolt 接続情報 ── -->

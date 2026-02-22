@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using MacWinBridge.Core.Configuration;
+using MacWinBridge.Display;
 using MacWinBridge.Display.Monitor;
 
 namespace MacWinBridge.App;
@@ -34,10 +35,18 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         MacHostInput.Text = _app.Config.MacHost;
-        UpdateDisplayModeUI(_app.Config.Display.Mode);
+
+        // Config.Display.Mode は DisplayModeSetting 型。DisplayMode に変換して UI 反映
+        var initialMode = _app.Config.Display.Mode == DisplayModeSetting.Mac
+            ? DisplayMode.Mac : DisplayMode.Windows;
+        UpdateDisplayModeUI(initialMode);
+
         UpdateAudioRoutingUI(_app.Config.Audio.Routing);
         UpdateFooter();
         PopulateMonitorList();
+
+        // KVM エッジ初期値をコンボボックスに反映
+        InitMacEdgeCombo();
 
         // USB スキャンはバックグラウンドで（WMI は遅い）
         _ = Task.Run(UsbPortScanner.GetPorts)
@@ -49,14 +58,44 @@ public partial class MainWindow : Window
         foreach (var line in AppLogger.GetBufferedLines())
             AppendLogLine(line);
 
-        AppLogger.LineAdded += line =>
-            Dispatcher.BeginInvoke(() => AppendLogLine(line));
+        AppLogger.LineAdded += OnLogLineAdded;
 
         // Wire up orchestrator events
         if (_app.Orchestrator is not null)
         {
             _app.Orchestrator.ConnectionChanged += (_, connected) =>
                 Dispatcher.Invoke(() => OnConnectionChanged(connected));
+            _app.Orchestrator.StatsUpdated += (_, _) =>
+                Dispatcher.BeginInvoke(UpdateVideoStats);
+        }
+    }
+
+    private void OnLogLineAdded(string line) =>
+        Dispatcher.BeginInvoke(() => AppendLogLine(line));
+
+    // ── KVM エッジ選択 ─────────────────────────────────
+    private void InitMacEdgeCombo()
+    {
+        var currentEdge = _app.Config.Input.MacEdge.ToString();
+        for (int i = 0; i < MacEdgeCombo.Items.Count; i++)
+        {
+            if (MacEdgeCombo.Items[i] is ComboBoxItem item && (string)item.Tag == currentEdge)
+            {
+                MacEdgeCombo.SelectedIndex = i;
+                break;
+            }
+        }
+    }
+
+    private void OnMacEdgeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (MacEdgeCombo.SelectedItem is not ComboBoxItem item) return;
+        var tag = (string)item.Tag;
+        if (Enum.TryParse<ScreenEdge>(tag, out var edge))
+        {
+            _app.Config.Input.MacEdge = edge;
+            _app.Config.Save();
+            AppLogger.Info($"Mac画面の位置を「{tag}」に変更");
         }
     }
 
@@ -170,7 +209,6 @@ public partial class MainWindow : Window
                 FontSize   = 11,
                 Cursor     = System.Windows.Input.Cursors.Hand,
                 Tag        = m.Index,
-                Style      = null,  // デフォルトスタイルをリセット
             };
             btn.Style   = (Style)FindResource("BridgeButton");
             btn.Content = isTarget ? "✓ 選択中" : "選択";
@@ -368,6 +406,26 @@ public partial class MainWindow : Window
             DisplayMode.Mac => "Macモード",
             _ => "不明",
         };
+
+        // 映像統計パネルの表示切替
+        VideoStatsPanel.Visibility = mode == DisplayMode.Mac
+            ? Visibility.Visible : Visibility.Collapsed;
+
+        // Config に現在のモードを保存
+        _app.Config.Display.Mode = mode == DisplayMode.Mac
+            ? DisplayModeSetting.Mac : DisplayModeSetting.Windows;
+        _app.Config.Save();
+    }
+
+    // ── 映像統計更新 ──────────────────────────
+    private void UpdateVideoStats()
+    {
+        if (_app.Orchestrator is not { IsConnected: true } orch) return;
+
+        StatsFps.Text = $"{orch.VideoFps:F1}";
+        StatsDecodeMs.Text = $"{orch.DecodingLatencyMs:F1} ms";
+        StatsResolution.Text = orch.VideoResolution;
+        StatsBandwidth.Text = $"{orch.BandwidthMbps:F1} Mbps";
     }
 
     private void OnConnectionChanged(bool connected)
@@ -392,6 +450,8 @@ public partial class MainWindow : Window
         // ── KVM ステータス ──
         KvmStatusText.Text = connected ? "アクティブ" : "停止";
         KvmStatusText.Foreground = connected ? ConnectedColor : DisconnectedColor;
+        KvmSubText.Text = connected
+            ? "フォーカス: Windows" : "画面端でMac操作に自動切替";
     }
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
@@ -403,7 +463,7 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
-        AppLogger.LineAdded -= line => Dispatcher.BeginInvoke(() => AppendLogLine(line));
+        AppLogger.LineAdded -= OnLogLineAdded;
         base.OnClosed(e);
     }
 }

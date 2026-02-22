@@ -16,8 +16,9 @@ class BridgeService: ObservableObject {
     @Published var displayMode: DisplayMode = .windows
     @Published var audioStreaming = false
     @Published var kvmActive = false
+    @Published var isFocusOnMac = false
     @Published var audioPacketsReceived: Int64 = 0
-    @Published var videFramesReceived: Int64 = 0
+    @Published var videoFramesSent: Int64 = 0
     
     // MARK: - Ports (must match Windows side)
     static let controlPort: UInt16 = 42100
@@ -38,6 +39,7 @@ class BridgeService: ObservableObject {
     private let videoReceiver = VideoReceiver()
     private let audioMixer = AudioMixer()
     private let inputInjector = InputInjector()
+    let screenStreamer = ScreenStreamer()
     
     // MARK: - Lifecycle
     
@@ -153,7 +155,7 @@ class BridgeService: ObservableObject {
     private func handleVideoConnection(_ connection: NWConnection) {
         receiveLoop(connection: connection) { [weak self] header, payload in
             guard let self = self else { return }
-            self.videFramesReceived += 1
+            self.videoFramesSent += 1
             self.videoReceiver.processFrame(payload: payload, flags: header.flags)
         }
     }
@@ -176,7 +178,24 @@ class BridgeService: ObservableObject {
         case .displaySwitch:
             if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                let modeStr = json["Mode"] as? String {
-                displayMode = modeStr == "Mac" ? .mac : .windows
+                let newMode: DisplayMode = modeStr == "Mac" ? .mac : .windows
+                displayMode = newMode
+                
+                // Start/stop screen streaming based on mode
+                if newMode == .mac, let conn = videoConnection {
+                    let width = json["Width"] as? Int ?? 1920
+                    let height = json["Height"] as? Int ?? 1080
+                    let fps = json["Fps"] as? Int ?? 60
+                    let bitrate = json["Bitrate"] as? Int ?? 20_000_000
+                    
+                    let streamer = ScreenStreamer(
+                        width: width, height: height, fps: fps, bitrate: bitrate)
+                    Task {
+                        await streamer.start(connection: conn)
+                    }
+                } else {
+                    screenStreamer.stop()
+                }
             }
             
         case .mouseMove:
@@ -184,6 +203,8 @@ class BridgeService: ObservableObject {
             let x = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
             let y = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
             inputInjector.moveMouse(x: Int(x), y: Int(y))
+            kvmActive = true
+            isFocusOnMac = true
             
         case .mouseButton:
             guard payload.count >= 4 else { return }
@@ -207,9 +228,29 @@ class BridgeService: ObservableObject {
             let vkCode = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
             inputInjector.keyUp(vkCode: Int(vkCode))
             
+        case .cursorReturn:
+            isFocusOnMac = false
+            kvmActive = false
+            
         default:
             break
         }
+    }
+    
+    /// Send CursorReturn to Windows to release KVM focus back.
+    func sendCursorReturn() {
+        guard let connection = controlConnection else { return }
+        
+        var packet = Data(capacity: 8)
+        var msgType: UInt16 = MessageType.cursorReturn.rawValue
+        packet.append(Data(bytes: &msgType, count: 2))
+        var flags: UInt16 = 0
+        packet.append(Data(bytes: &flags, count: 2))
+        var length: UInt32 = 0
+        packet.append(Data(bytes: &length, count: 4))
+        
+        connection.send(content: packet, completion: .contentProcessed { _ in })
+        isFocusOnMac = false
     }
     
     // MARK: - Receive Loop
@@ -256,6 +297,9 @@ class BridgeService: ObservableObject {
     private func handleDisconnect() {
         isConnected = false
         audioStreaming = false
+        kvmActive = false
+        isFocusOnMac = false
+        screenStreamer.stop()
         statusMessage = "Windows ホストが切断されました"
         audioMixer.stop()
     }
@@ -286,6 +330,7 @@ enum MessageType: UInt16 {
     case mouseMove      = 0x0300
     case mouseButton    = 0x0301
     case mouseScroll    = 0x0302
+    case cursorReturn   = 0x0303
     case keyDown        = 0x0310
     case keyUp          = 0x0311
     case clipboardSync  = 0x0320
