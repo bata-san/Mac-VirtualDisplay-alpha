@@ -2,230 +2,205 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Mac-Win Bridge"
-        Width="480" Height="680"
-        MinWidth="420" MinHeight="500"
+        Width="380" Height="520"
+        MinWidth="340" MinHeight="460"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource SurfaceBrush}"
-        ResizeMode="CanResizeWithGrip">
+        ResizeMode="NoResize">
 
-    <Window.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVis" />
-    </Window.Resources>
+    <StackPanel Margin="28,24,28,24">
 
-    <Grid Margin="24">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
-
-        <!-- Header -->
-        <StackPanel Grid.Row="0" Margin="0,0,0,20">
-            <TextBlock Text="🌉 Mac-Win Bridge"
-                       FontSize="24" FontWeight="Bold"
-                       Foreground="{StaticResource TextBrush}" />
-            <TextBlock x:Name="StatusText"
-                       Text="未接続"
-                       FontSize="13"
-                       Foreground="{StaticResource TextMutedBrush}"
-                       Margin="0,4,0,0" />
-        </StackPanel>
-
-        <!-- Connection Card -->
-        <Border Grid.Row="1" Style="{StaticResource CardBorder}">
-            <StackPanel>
-                <TextBlock Text="📡 接続" FontSize="16" FontWeight="SemiBold"
-                           Foreground="{StaticResource TextBrush}" Margin="0,0,0,12" />
-
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-
-                    <TextBox x:Name="MacHostInput"
-                             Grid.Column="0"
-                             Text="auto"
-                             FontSize="14"
-                             Padding="12,8"
-                             Background="#333350"
-                             Foreground="{StaticResource TextBrush}"
-                             BorderBrush="#444466"
-                             BorderThickness="1"
-                             VerticalAlignment="Center" />
-
-                    <Button x:Name="ConnectButton"
-                            Grid.Column="1"
-                            Content="接続"
-                            Style="{StaticResource BridgeButton}"
-                            Click="OnConnectClick"
-                            Margin="8,0,0,0" />
+        <!-- ── 接続ステータスバッジ ── -->
+        <Border x:Name="StatusBadge"
+                Background="#1A1A2E"
+                CornerRadius="16"
+                Padding="0,20"
+                Margin="0,0,0,20">
+            <StackPanel HorizontalAlignment="Center">
+                <!-- 接続インジケーター -->
+                <Grid HorizontalAlignment="Center" Margin="0,0,0,10">
+                    <Ellipse x:Name="StatusDot"
+                             Width="18" Height="18"
+                             Fill="#DC2626" />
+                    <!-- 点滅リング (接続中) -->
+                    <Ellipse x:Name="StatusRing"
+                             Width="28" Height="28"
+                             Stroke="#DC2626" StrokeThickness="2"
+                             Fill="Transparent"
+                             Opacity="0" />
                 </Grid>
 
-                <TextBlock x:Name="ConnectionInfo"
-                           Text="「auto」でMacを自動検出、またはIPアドレスを入力"
-                           FontSize="11"
-                           Foreground="{StaticResource TextMutedBrush}"
-                           Margin="0,8,0,0" />
-            </StackPanel>
-        </Border>
+                <TextBlock x:Name="ConnectionLabel"
+                           Text="未接続"
+                           FontSize="20" FontWeight="Bold"
+                           Foreground="{StaticResource TextBrush}"
+                           HorizontalAlignment="Center" />
 
-        <!-- Display Switcher Card -->
-        <Border Grid.Row="2" Style="{StaticResource CardBorder}">
-            <StackPanel>
-                <TextBlock Text="🖥️ ディスプレイ切替" FontSize="16" FontWeight="SemiBold"
-                           Foreground="{StaticResource TextBrush}" Margin="0,0,0,12" />
-
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-
-                    <Button x:Name="WindowsModeButton"
-                            Grid.Column="0"
-                            Content="🪟 Windows"
-                            Style="{StaticResource BridgeButton}"
-                            Click="OnWindowsModeClick"
-                            Margin="0,0,4,0" />
-
-                    <Button x:Name="MacModeButton"
-                            Grid.Column="1"
-                            Content="🍎 Mac"
-                            Style="{StaticResource BridgeButton}"
-                            Click="OnMacModeClick"
-                            Margin="4,0,0,0" />
-                </Grid>
-
-                <TextBlock x:Name="DisplayModeText"
-                           Text="現在: Windowsモード"
+                <TextBlock x:Name="ConnectionSubLabel"
+                           Text="Macが見つかりません"
                            FontSize="12"
                            Foreground="{StaticResource TextMutedBrush}"
-                           Margin="0,8,0,0" />
-            </StackPanel>
-        </Border>
-
-        <!-- Audio Card -->
-        <Border Grid.Row="3" Style="{StaticResource CardBorder}">
-            <StackPanel>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-
-                    <TextBlock Text="🔊 統合オーディオ" FontSize="16" FontWeight="SemiBold"
-                               Foreground="{StaticResource TextBrush}" />
-
-                    <TextBlock x:Name="AudioStatusText"
-                               Grid.Column="1"
-                               Text="停止"
-                               FontSize="12"
-                               Foreground="{StaticResource TextMutedBrush}"
-                               VerticalAlignment="Center" />
-                </Grid>
-
-                <!-- Audio Routing Buttons -->
-                <TextBlock Text="音声の出力先" FontSize="13" FontWeight="SemiBold"
-                           Foreground="{StaticResource TextBrush}" Margin="0,12,0,8" />
-
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-
-                    <Button x:Name="AudioToMacButton"
-                            Grid.Column="0"
-                            Content="🍎 Mac"
-                            Style="{StaticResource BridgeButton}"
-                            Click="OnAudioToMacClick"
-                            Margin="0,0,3,0" />
-
-                    <Button x:Name="AudioToWinButton"
-                            Grid.Column="1"
-                            Content="🪟 Win"
-                            Style="{StaticResource BridgeButton}"
-                            Click="OnAudioToWinClick"
-                            Margin="3,0,3,0" />
-
-                    <Button x:Name="AudioToBothButton"
-                            Grid.Column="2"
-                            Content="🔀 両方"
-                            Style="{StaticResource BridgeButton}"
-                            Click="OnAudioToBothClick"
-                            Margin="3,0,0,0" />
-                </Grid>
-
-                <TextBlock x:Name="AudioRoutingText"
-                           Text="現在: Windows音声 → Macで再生"
-                           FontSize="12"
-                           Foreground="{StaticResource TextMutedBrush}"
-                           Margin="0,8,0,0" />
-
-                <TextBlock x:Name="AudioStatsText"
-                           Text=""
-                           FontSize="11"
-                           Foreground="{StaticResource TextMutedBrush}"
+                           HorizontalAlignment="Center"
                            Margin="0,4,0,0" />
             </StackPanel>
         </Border>
 
-        <!-- Smart KVM Card -->
-        <Border Grid.Row="4" Style="{StaticResource CardBorder}">
-            <StackPanel>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
+        <!-- ── 接続操作 ── -->
+        <Grid Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
 
-                    <TextBlock Text="⌨️ Smart KVM" FontSize="16" FontWeight="SemiBold"
+            <Border Background="#252540" CornerRadius="8" Padding="2">
+                <TextBox x:Name="MacHostInput"
+                         Text="auto"
+                         FontSize="14"
+                         Padding="10,7"
+                         Background="Transparent"
+                         Foreground="{StaticResource TextBrush}"
+                         BorderThickness="0"
+                         VerticalAlignment="Center" />
+            </Border>
+
+            <Button x:Name="ConnectButton"
+                    Grid.Column="1"
+                    Content="接続"
+                    Style="{StaticResource BridgeButton}"
+                    Click="OnConnectClick"
+                    Width="80"
+                    Margin="8,0,0,0" />
+        </Grid>
+
+        <!-- ── ディスプレイ切替 ── -->
+        <Border Style="{StaticResource CardBorder}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="🖥️"
+                           FontSize="18" VerticalAlignment="Center"
+                           Margin="0,0,10,0" />
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="ディスプレイ"
+                               FontSize="13" FontWeight="SemiBold"
                                Foreground="{StaticResource TextBrush}" />
+                    <TextBlock x:Name="DisplayModeText"
+                               Text="Windowsモード"
+                               FontSize="11"
+                               Foreground="{StaticResource TextMutedBrush}" />
+                </StackPanel>
 
-                    <TextBlock x:Name="KvmStatusText"
-                               Grid.Column="1"
-                               Text="停止"
-                               FontSize="12"
-                               Foreground="{StaticResource TextMutedBrush}"
-                               VerticalAlignment="Center" />
-                </Grid>
+                <Button x:Name="WindowsModeButton"
+                        Grid.Column="2"
+                        Content="🪟"
+                        Style="{StaticResource IconButton}"
+                        Click="OnWindowsModeClick"
+                        Margin="0,0,6,0"
+                        ToolTip="Windowsモード" />
 
-                <TextBlock Text="マウスが画面端に到達すると自動でMac操作に切替"
-                           FontSize="12"
-                           Foreground="{StaticResource TextMutedBrush}"
-                           Margin="0,4,0,0"
-                           TextWrapping="Wrap" />
-
-                <TextBlock x:Name="KvmHotkeyText"
-                           Text="手動切替: Ctrl+Alt+K"
-                           FontSize="11"
-                           Foreground="{StaticResource TextMutedBrush}"
-                           Margin="0,4,0,0" />
-            </StackPanel>
+                <Button x:Name="MacModeButton"
+                        Grid.Column="3"
+                        Content="🍎"
+                        Style="{StaticResource IconButton}"
+                        Click="OnMacModeClick"
+                        ToolTip="Macモード" />
+            </Grid>
         </Border>
 
-        <!-- Spacer -->
-        <Grid Grid.Row="5" />
+        <!-- ── 音声ルーティング ── -->
+        <Border Style="{StaticResource CardBorder}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
 
-        <!-- Footer -->
-        <StackPanel Grid.Row="6" Orientation="Horizontal"
-                    HorizontalAlignment="Center">
-            <TextBlock Text="Mac-Win Bridge v0.1.0"
-                       FontSize="11"
-                       Foreground="{StaticResource TextMutedBrush}" />
-            <TextBlock Text=" · "
-                       FontSize="11"
-                       Foreground="{StaticResource TextMutedBrush}" />
-            <TextBlock x:Name="MonitorCountText"
-                       Text="モニター: 検出中..."
-                       FontSize="11"
-                       Foreground="{StaticResource TextMutedBrush}" />
-        </StackPanel>
-    </Grid>
+                <TextBlock Grid.Column="0" Text="🔊"
+                           FontSize="18" VerticalAlignment="Center"
+                           Margin="0,0,10,0" />
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="音声の出力先"
+                               FontSize="13" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextBrush}" />
+                    <TextBlock x:Name="AudioRoutingText"
+                               Text="Win → Mac"
+                               FontSize="11"
+                               Foreground="{StaticResource TextMutedBrush}" />
+                </StackPanel>
+
+                <Button x:Name="AudioToMacButton"
+                        Grid.Column="2"
+                        Content="🍎"
+                        Style="{StaticResource IconButton}"
+                        Click="OnAudioToMacClick"
+                        Margin="0,0,6,0"
+                        ToolTip="MacのスピーカーでWindowsの音を再生" />
+
+                <Button x:Name="AudioToWinButton"
+                        Grid.Column="3"
+                        Content="🪟"
+                        Style="{StaticResource IconButton}"
+                        Click="OnAudioToWinClick"
+                        Margin="0,0,6,0"
+                        ToolTip="WindowsのスピーカーでMacの音を再生" />
+
+                <Button x:Name="AudioToBothButton"
+                        Grid.Column="4"
+                        Content="🔀"
+                        Style="{StaticResource IconButton}"
+                        Click="OnAudioToBothClick"
+                        ToolTip="両方のデバイスで再生" />
+            </Grid>
+        </Border>
+
+        <!-- ── Smart KVM ── -->
+        <Border Style="{StaticResource CardBorder}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="⌨️"
+                           FontSize="18" VerticalAlignment="Center"
+                           Margin="0,0,10,0" />
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="Smart KVM"
+                               FontSize="13" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextBrush}" />
+                    <TextBlock Text="画面端でMac操作に自動切替"
+                               FontSize="11"
+                               Foreground="{StaticResource TextMutedBrush}" />
+                </StackPanel>
+
+                <TextBlock x:Name="KvmStatusText"
+                           Grid.Column="2"
+                           Text="停止"
+                           FontSize="12"
+                           Foreground="{StaticResource TextMutedBrush}"
+                           VerticalAlignment="Center" />
+            </Grid>
+        </Border>
+
+        <!-- ── フッター ── -->
+        <TextBlock x:Name="FooterText"
+                   Text=""
+                   FontSize="11"
+                   Foreground="{StaticResource TextMutedBrush}"
+                   HorizontalAlignment="Center"
+                   Margin="0,8,0,0" />
+
+    </StackPanel>
 </Window>

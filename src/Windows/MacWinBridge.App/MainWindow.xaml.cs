@@ -9,7 +9,16 @@ namespace MacWinBridge.App;
 public partial class MainWindow : Window
 {
     private readonly App _app;
-    private System.Windows.Threading.DispatcherTimer? _statsTimer;
+
+    // ステータスドット用カラー
+    private static readonly SolidColorBrush ConnectedColor =
+        new(Color.FromRgb(0x16, 0xA3, 0x4A));   // #16A34A
+    private static readonly SolidColorBrush DisconnectedColor =
+        new(Color.FromRgb(0xDC, 0x26, 0x26));   // #DC2626
+    private static readonly SolidColorBrush BadgeConnected =
+        new(Color.FromRgb(0x06, 0x2B, 0x15));   // 濃い緑背景
+    private static readonly SolidColorBrush BadgeDisconnected =
+        new(Color.FromRgb(0x1A, 0x1A, 0x2E));   // 暗い紫背景
 
     public MainWindow(App app)
     {
@@ -19,37 +28,26 @@ public partial class MainWindow : Window
         MacHostInput.Text = _app.Config.MacHost;
         UpdateDisplayModeUI(_app.Config.Display.Mode);
         UpdateAudioRoutingUI(_app.Config.Audio.Routing);
-        DetectMonitors();
+        UpdateFooter();
 
         // Wire up orchestrator events
         if (_app.Orchestrator is not null)
         {
-            _app.Orchestrator.StatusMessage += (_, msg) =>
-                Dispatcher.Invoke(() => StatusText.Text = msg);
-
             _app.Orchestrator.ConnectionChanged += (_, connected) =>
                 Dispatcher.Invoke(() => OnConnectionChanged(connected));
         }
-
-        // Stats refresh timer
-        _statsTimer = new System.Windows.Threading.DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(1),
-        };
-        _statsTimer.Tick += (_, _) => UpdateStats();
-        _statsTimer.Start();
     }
 
-    private void DetectMonitors()
+    private void UpdateFooter()
     {
         try
         {
             var monitors = MonitorManager.GetMonitors();
-            MonitorCountText.Text = $"モニター: {monitors.Count}台検出";
+            FooterText.Text = $"Mac-Win Bridge v0.1.0  ·  モニター {monitors.Count}台";
         }
         catch
         {
-            MonitorCountText.Text = "モニター: 検出失敗";
+            FooterText.Text = "Mac-Win Bridge v0.1.0";
         }
     }
 
@@ -60,11 +58,9 @@ public partial class MainWindow : Window
         if (_app.Orchestrator.IsConnected)
         {
             await _app.Orchestrator.DisconnectAsync();
-            ConnectButton.Content = "接続";
             return;
         }
 
-        // Save host config
         _app.Config.MacHost = MacHostInput.Text.Trim();
         _app.Config.Save();
 
@@ -74,7 +70,7 @@ public partial class MainWindow : Window
         await _app.Orchestrator.ConnectAsync();
 
         ConnectButton.IsEnabled = true;
-        ConnectButton.Content = _app.Orchestrator.IsConnected ? "切断" : "接続";
+        // OnConnectionChanged が呼ばれてボタンテキストを更新
     }
 
     private async void OnWindowsModeClick(object sender, RoutedEventArgs e)
@@ -92,20 +88,14 @@ public partial class MainWindow : Window
     }
 
     // ── Audio Routing ────────────────────────────────
-    private async void OnAudioToMacClick(object sender, RoutedEventArgs e)
-    {
+    private async void OnAudioToMacClick(object sender, RoutedEventArgs e) =>
         await SetAudioRoutingAsync(AudioRouting.WindowsToMac);
-    }
 
-    private async void OnAudioToWinClick(object sender, RoutedEventArgs e)
-    {
+    private async void OnAudioToWinClick(object sender, RoutedEventArgs e) =>
         await SetAudioRoutingAsync(AudioRouting.MacToWindows);
-    }
 
-    private async void OnAudioToBothClick(object sender, RoutedEventArgs e)
-    {
+    private async void OnAudioToBothClick(object sender, RoutedEventArgs e) =>
         await SetAudioRoutingAsync(AudioRouting.Both);
-    }
 
     private async Task SetAudioRoutingAsync(AudioRouting routing)
     {
@@ -125,73 +115,56 @@ public partial class MainWindow : Window
 
         AudioRoutingText.Text = routing switch
         {
-            AudioRouting.WindowsToMac => "現在: Windows音声 → Macで再生 🍎",
-            AudioRouting.MacToWindows => "現在: Mac音声 → Windowsで再生 🪟",
-            AudioRouting.Both => "現在: 両方のデバイスで再生 🔀",
+            AudioRouting.WindowsToMac => "Win → Mac",
+            AudioRouting.MacToWindows => "Mac → Win",
+            AudioRouting.Both => "両方",
             _ => "不明",
         };
     }
 
     private void UpdateDisplayModeUI(DisplayMode mode)
     {
+        var primary = (SolidColorBrush)FindResource("PrimaryBrush");
+        var active = (SolidColorBrush)FindResource("SuccessBrush");
+
+        WindowsModeButton.Background = mode == DisplayMode.Windows ? active : primary;
+        MacModeButton.Background = mode == DisplayMode.Mac ? active : primary;
+
         DisplayModeText.Text = mode switch
         {
-            DisplayMode.Mac => "現在: Macモード 🍎",
-            DisplayMode.Windows => "現在: Windowsモード 🪟",
+            DisplayMode.Windows => "Windowsモード",
+            DisplayMode.Mac => "Macモード",
             _ => "不明",
         };
-
-        // Highlight active mode button
-        WindowsModeButton.Background = mode == DisplayMode.Windows
-            ? (SolidColorBrush)FindResource("SuccessBrush")
-            : (SolidColorBrush)FindResource("PrimaryBrush");
-
-        MacModeButton.Background = mode == DisplayMode.Mac
-            ? (SolidColorBrush)FindResource("SuccessBrush")
-            : (SolidColorBrush)FindResource("PrimaryBrush");
     }
 
     private void OnConnectionChanged(bool connected)
     {
+        // ── バッジ全体の背景 ──
+        StatusBadge.Background = connected ? BadgeConnected : BadgeDisconnected;
+
+        // ── インジケータードット ──
+        StatusDot.Fill = connected ? ConnectedColor : DisconnectedColor;
+        StatusRing.Stroke = connected ? ConnectedColor : DisconnectedColor;
+        StatusRing.Opacity = connected ? 0.45 : 0.0;
+
+        // ── テキスト ──
+        ConnectionLabel.Text = connected ? "接続済み" : "未接続";
+        ConnectionSubLabel.Text = connected
+            ? $"Mac に接続中 — {_app.Orchestrator?.ConnectedMacName}"
+            : "Macが見つかりません";
+
+        // ── ボタン ──
         ConnectButton.Content = connected ? "切断" : "接続";
 
-        var connectedBrush = connected
-            ? (SolidColorBrush)FindResource("SuccessBrush")
-            : (SolidColorBrush)FindResource("DangerBrush");
-
-        AudioStatusText.Text = connected ? "ストリーミング中" : "停止";
-        AudioStatusText.Foreground = connectedBrush;
-
+        // ── KVM ステータス ──
         KvmStatusText.Text = connected ? "アクティブ" : "停止";
-        KvmStatusText.Foreground = connectedBrush;
-
-        ConnectionInfo.Text = connected
-            ? $"接続先: {_app.Orchestrator?.ConnectedMacName}"
-            : "「auto」でMacを自動検出、またはIPアドレスを入力";
-    }
-
-    private void UpdateStats()
-    {
-        if (_app.Orchestrator?.AudioService is { } audio && audio.IsStreaming)
-        {
-            AudioStatsText.Text = $"パケット: {audio.PacketsSent:#,0} · 送信: {FormatBytes(audio.BytesSent)}";
-        }
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        return bytes switch
-        {
-            < 1024 => $"{bytes} B",
-            < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
-            < 1024 * 1024 * 1024 => $"{bytes / (1024.0 * 1024):F1} MB",
-            _ => $"{bytes / (1024.0 * 1024 * 1024):F2} GB",
-        };
+        KvmStatusText.Foreground = connected ? ConnectedColor : DisconnectedColor;
     }
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        // Minimize to tray instead of closing
+        // トレイに最小化
         e.Cancel = true;
         Hide();
     }
