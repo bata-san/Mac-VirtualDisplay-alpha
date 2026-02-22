@@ -198,8 +198,8 @@ class ScreenStreamer: NSObject, ObservableObject, SCStreamOutput {
         // Message header (8 bytes)
         var packet = Data(capacity: 8 + frameHeaderSize + nalData.count)
         
-        // Type: VideoFrame (0x0202)
-        var msgType: UInt16 = 0x0202
+        // Type: VideoFrame (0x0100) – matches MessageType.videoFrame
+        var msgType: UInt16 = 0x0100
         packet.append(Data(bytes: &msgType, count: 2))
         
         // Flags

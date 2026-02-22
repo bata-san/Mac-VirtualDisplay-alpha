@@ -92,14 +92,17 @@ public sealed class GlobalInputHook : IDisposable
             var info = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
             int msg = (int)wParam;
 
+            // Always fire MouseMoved so SmartKvmService can detect edge crossings
+            if (msg == WM_MOUSEMOVE)
+            {
+                MouseMoved?.Invoke(info.pt.x, info.pt.y);
+            }
+
             if (_isFocusOnMac)
             {
                 // Forward mouse events to Mac
                 switch (msg)
                 {
-                    case WM_MOUSEMOVE:
-                        MouseMoved?.Invoke(info.pt.x, info.pt.y);
-                        break;
                     case WM_LBUTTONDOWN:
                         MouseButtonAction?.Invoke(1);
                         break;

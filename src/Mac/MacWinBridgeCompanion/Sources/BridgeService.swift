@@ -3,6 +3,7 @@
 import Foundation
 import Combine
 import Network
+import AppKit
 
 /// Manages TCP connections from the Windows host and dispatches messages
 /// to the appropriate handlers (video, audio, input).
@@ -43,6 +44,10 @@ class BridgeService: ObservableObject {
     // MARK: - Lifecycle
     
     init() {
+        // Wire up CursorReturn: when cursor leaves Mac, send to Windows
+        inputInjector.onCursorReturn = { [weak self] edge, position in
+            self?.sendCursorReturn(edge: edge, position: position)
+        }
         startDiscoveryResponder()
         startListening()
     }
@@ -158,12 +163,32 @@ class BridgeService: ObservableObject {
     
     private func handleAudioConnection(_ connection: NWConnection) {
         audioStreaming = true
-        audioMixer.start()
         
         receiveLoop(connection: connection) { [weak self] header, payload in
             guard let self = self else { return }
-            self.audioPacketsReceived += 1
-            self.audioMixer.receiveAudioPacket(payload)
+            
+            switch header.type {
+            case .audioConfig:
+                // Parse audio config from Windows
+                if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] {
+                    let sampleRate = json["SampleRate"] as? Int ?? 48000
+                    let channels = json["Channels"] as? Int ?? 2
+                    let bitsPerSample = json["BitsPerSample"] as? Int ?? 16
+                    self.audioMixer.configure(sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample)
+                    self.audioMixer.start()
+                }
+                
+            case .audioData:
+                self.audioPacketsReceived += 1
+                self.audioMixer.receiveAudioData(payload)
+                
+            case .audioControl:
+                // Handle audio routing changes, etc.
+                break
+                
+            default:
+                break
+            }
         }
     }
     
@@ -171,6 +196,14 @@ class BridgeService: ObservableObject {
     
     private func handleControlMessage(type: MessageType, payload: Data) {
         switch type {
+        case .handshake:
+            // Windows sent handshake; send ack
+            sendHandshakeAck()
+            
+        case .heartbeat:
+            // Respond to heartbeat
+            sendHeartbeatAck()
+            
         case .displaySwitch:
             if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                let modeStr = json["Mode"] as? String {
@@ -185,12 +218,40 @@ class BridgeService: ObservableObject {
                     let bitrate = json["Bitrate"] as? Int ?? 20_000_000
                     
                     screenStreamer.configure(width: width, height: height, fps: fps, bitrate: bitrate)
+                    
+                    // Configure InputInjector with Mac screen dimensions
+                    if let screen = NSScreen.main {
+                        let returnEdge: String
+                        switch (json["MacEdge"] as? String) ?? "Right" {
+                        case "Right": returnEdge = "Left"
+                        case "Left": returnEdge = "Right"
+                        case "Top": returnEdge = "Bottom"
+                        case "Bottom": returnEdge = "Top"
+                        default: returnEdge = "Left"
+                        }
+                        inputInjector.configure(
+                            width: screen.frame.width,
+                            height: screen.frame.height,
+                            returnEdge: returnEdge)
+                    }
+                    
                     Task {
                         await self.screenStreamer.start(connection: conn)
                     }
                 } else {
                     screenStreamer.stop()
                 }
+            }
+            
+        case .videoKeyRequest:
+            screenStreamer.forceKeyFrame()
+            
+        case .audioConfig:
+            if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] {
+                let sampleRate = json["SampleRate"] as? Int ?? 48000
+                let channels = json["Channels"] as? Int ?? 2
+                let bitsPerSample = json["BitsPerSample"] as? Int ?? 16
+                audioMixer.configure(sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample)
             }
             
         case .mouseMove:
@@ -214,12 +275,12 @@ class BridgeService: ObservableObject {
                                deltaY: isHorizontal == 0 ? Int(delta) : 0)
             
         case .keyDown:
-            guard payload.count >= 12 else { return }
+            guard payload.count >= 4 else { return }
             let vkCode = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
             inputInjector.injectKeyDown(vkCode: Int(vkCode))
             
         case .keyUp:
-            guard payload.count >= 12 else { return }
+            guard payload.count >= 4 else { return }
             let vkCode = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
             inputInjector.injectKeyUp(vkCode: Int(vkCode))
             
@@ -227,17 +288,22 @@ class BridgeService: ObservableObject {
             isFocusOnMac = false
             kvmActive = false
             
+        case .kvmConfig:
+            // Windows sent its screen dimensions for coordinate mapping
+            break
+            
         default:
             break
         }
     }
     
     /// Send CursorReturn to Windows to release KVM focus back.
-    func sendCursorReturn() {
+    func sendCursorReturn(edge: String = "Left", position: Double = 0.5) {
         guard let connection = controlConnection else { return }
         
+        // Build CursorReturn message: header (8 bytes) + no payload for simple return
         var packet = Data(capacity: 8)
-        var msgType: UInt16 = MessageType.cursorReturn.rawValue
+        var msgType: UInt16 = MessageType.cursorReturn.rawValue  // 0x0303
         packet.append(Data(bytes: &msgType, count: 2))
         var flags: UInt16 = 0
         packet.append(Data(bytes: &flags, count: 2))
@@ -246,6 +312,46 @@ class BridgeService: ObservableObject {
         
         connection.send(content: packet, completion: .contentProcessed { _ in })
         isFocusOnMac = false
+    }
+    
+    /// Send HandshakeAck to Windows.
+    private func sendHandshakeAck() {
+        guard let connection = controlConnection else { return }
+        
+        let ackPayload: [String: Any] = [
+            "AppVersion": "0.1.0",
+            "MachineName": Host.current().localizedName ?? "Mac",
+            "ScreenWidth": Int(NSScreen.main?.frame.width ?? 2560),
+            "ScreenHeight": Int(NSScreen.main?.frame.height ?? 1600)
+        ]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: ackPayload) else { return }
+        
+        var packet = Data(capacity: 8 + jsonData.count)
+        var msgType: UInt16 = MessageType.handshakeAck.rawValue
+        packet.append(Data(bytes: &msgType, count: 2))
+        var flags: UInt16 = 0
+        packet.append(Data(bytes: &flags, count: 2))
+        var payloadLen: UInt32 = UInt32(jsonData.count)
+        packet.append(Data(bytes: &payloadLen, count: 4))
+        packet.append(jsonData)
+        
+        connection.send(content: packet, completion: .contentProcessed { _ in })
+    }
+    
+    /// Respond to Windows heartbeat.
+    private func sendHeartbeatAck() {
+        guard let connection = controlConnection else { return }
+        
+        var packet = Data(capacity: 8)
+        var msgType: UInt16 = MessageType.heartbeat.rawValue
+        packet.append(Data(bytes: &msgType, count: 2))
+        var flags: UInt16 = 0
+        packet.append(Data(bytes: &flags, count: 2))
+        var length: UInt32 = 0
+        packet.append(Data(bytes: &length, count: 4))
+        
+        connection.send(content: packet, completion: .contentProcessed { _ in })
     }
     
     // MARK: - Receive Loop
@@ -308,20 +414,25 @@ enum DisplayMode: String {
 }
 
 enum MessageType: UInt16 {
+    // Control (0x00xx)
     case handshake      = 0x0001
     case handshakeAck   = 0x0002
     case heartbeat      = 0x0003
     case disconnect     = 0x0004
     
+    // Video (0x01xx)
     case videoFrame     = 0x0100
     case videoConfig    = 0x0101
     case displaySwitch  = 0x0102
     case displayStatus  = 0x0103
+    case videoKeyRequest = 0x0104
     
+    // Audio (0x02xx)
     case audioData      = 0x0200
     case audioConfig    = 0x0201
     case audioControl   = 0x0202
     
+    // Input / KVM (0x03xx)
     case mouseMove      = 0x0300
     case mouseButton    = 0x0301
     case mouseScroll    = 0x0302
@@ -329,6 +440,7 @@ enum MessageType: UInt16 {
     case keyDown        = 0x0310
     case keyUp          = 0x0311
     case clipboardSync  = 0x0320
+    case kvmConfig      = 0x0330
     
     case unknown        = 0xFFFF
 }

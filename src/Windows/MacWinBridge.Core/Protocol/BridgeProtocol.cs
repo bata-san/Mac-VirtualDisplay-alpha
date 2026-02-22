@@ -1,6 +1,9 @@
 // Mac-Win Bridge: Core communication protocol definitions.
 // Defines message types, flags, headers, and payload structures
 // for all communication between Windows and Mac.
+//
+// Wire format matches bridge_protocol.md specification.
+// Message type values are shared with the Mac Swift companion.
 
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
@@ -9,36 +12,38 @@ namespace MacWinBridge.Core.Protocol;
 
 /// <summary>
 /// All message types exchanged over the bridge.
-/// Grouped by function: Control (0x01xx), Video (0x02xx), Audio (0x03xx), Input (0x04xx).
+/// Values MUST match the Swift <c>MessageType</c> enum in BridgeService.swift.
+/// Grouped by function: Control (0x00xx), Video (0x01xx), Audio (0x02xx), Input (0x03xx).
 /// </summary>
 public enum MessageType : ushort
 {
-    // ── Control ──────────────────────────────────────
-    Handshake       = 0x0101,
-    HandshakeAck    = 0x0102,
-    Heartbeat       = 0x0103,
-    HeartbeatAck    = 0x0104,
-    DisplaySwitch   = 0x0105,
-    Disconnect      = 0x010F,
+    // ── Control (0x00xx) ─────────────────────────────
+    Handshake       = 0x0001,
+    HandshakeAck    = 0x0002,
+    Heartbeat       = 0x0003,
+    Disconnect      = 0x0004,
 
-    // ── Video ────────────────────────────────────────
-    VideoConfig     = 0x0201,
-    VideoFrame      = 0x0202,
-    VideoKeyRequest = 0x0203,   // Windows requests a keyframe from Mac
+    // ── Video (0x01xx) ───────────────────────────────
+    VideoFrame      = 0x0100,
+    VideoConfig     = 0x0101,
+    DisplaySwitch   = 0x0102,
+    DisplayStatus   = 0x0103,
+    VideoKeyRequest = 0x0104,   // Windows requests a keyframe from Mac
 
-    // ── Audio ────────────────────────────────────────
-    AudioConfig     = 0x0301,
-    AudioData       = 0x0302,
-    AudioControl    = 0x0303,
+    // ── Audio (0x02xx) ───────────────────────────────
+    AudioData       = 0x0200,
+    AudioConfig     = 0x0201,
+    AudioControl    = 0x0202,
 
-    // ── Input / KVM ──────────────────────────────────
-    MouseMove       = 0x0401,
-    MouseButton     = 0x0402,
-    MouseScroll     = 0x0403,
-    KeyDown         = 0x0404,
-    KeyUp           = 0x0405,
-    CursorReturn    = 0x0406,   // Mac→Win: cursor left Mac screen, return to Windows
-    KvmConfig       = 0x0407,   // Exchange screen resolution for coordinate mapping
+    // ── Input / KVM (0x03xx) ─────────────────────────
+    MouseMove       = 0x0300,
+    MouseButton     = 0x0301,
+    MouseScroll     = 0x0302,
+    CursorReturn    = 0x0303,   // Mac→Win: cursor left Mac screen
+    KeyDown         = 0x0310,
+    KeyUp           = 0x0311,
+    ClipboardSync   = 0x0320,
+    KvmConfig       = 0x0330,   // Exchange screen resolution for coordinate mapping
 }
 
 /// <summary>

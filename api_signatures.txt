@@ -1,0 +1,12 @@
+M:Vortice.MediaFoundation.IMFTransform.ProcessOutput(Vortice.MediaFoundation.ProcessOutputFlags,System.Int32,Vortice.MediaFoundation.OutputDataBuffer@,Vortice.MediaFoundation.ProcessOutputStatus@)
+M:Vortice.MediaFoundation.IMFTransform.GetOutputStreamInfo(System.Int32)
+M:Vortice.MediaFoundation.IMFTransform.ProcessMessage(Vortice.MediaFoundation.TMessageType,System.UIntPtr)
+M:Vortice.MediaFoundation.IMFMediaBuffer.Lock(System.IntPtr@,System.Int32@,System.Int32@)
+M:Vortice.MediaFoundation.IMFDXGIBuffer.GetResource(System.Guid)
+M:Vortice.MediaFoundation.IMFDXGIBuffer.GetSubresourceIndex
+M:Vortice.MediaFoundation.IMFDXGIBuffer.GetUnknown(System.Guid,System.Guid)
+M:Vortice.MediaFoundation.IMFDXGIBuffer.SetUnknown(System.Guid,SharpGen.Runtime.IUnknown)
+M:Vortice.MediaFoundation.IMFDXGIDeviceManager.ResetDevice(SharpGen.Runtime.IUnknown,System.Int32)
+M:Vortice.MediaFoundation.MediaFactory.MFCreateDXGIDeviceManager(System.Int32@,Vortice.MediaFoundation.IMFDXGIDeviceManager@)
+M:Vortice.MediaFoundation.IMFAttributes.GetUInt32(System.Guid)
+M:Vortice.MediaFoundation.IMFAttributes.GetUInt32(System.Guid,System.UInt32@)

@@ -1,0 +1,1 @@
+M:Vortice.MediaFoundation.MediaFactory.MFTEnumEx(System.Guid,System.UInt32,System.Nullable{Vortice.MediaFoundation.RegisterTypeInfo},System.Nullable{Vortice.MediaFoundation.RegisterTypeInfo},System.IntPtr@,System.UInt32@)
