@@ -61,19 +61,22 @@ class InputInjector: ObservableObject {
     func injectMouseButton(action: Int) {
         let point = CGPoint(x: lastMouseX, y: lastMouseY)
         
-        let (eventType, button): (CGEventType, CGMouseButton) = switch action {
-        case 1: (.leftMouseDown,  .left)
-        case 2: (.leftMouseUp,    .left)
-        case 3: (.rightMouseDown, .right)
-        case 4: (.rightMouseUp,   .right)
-        case 5: (.otherMouseDown, .center)
-        case 6: (.otherMouseUp,   .center)
-        default: return
+        guard (1...6).contains(action) else { return }
+        
+        let eventType: CGEventType
+        let button: CGMouseButton
+        switch action {
+        case 1: (eventType, button) = (.leftMouseDown,  .left)
+        case 2: (eventType, button) = (.leftMouseUp,    .left)
+        case 3: (eventType, button) = (.rightMouseDown, .right)
+        case 4: (eventType, button) = (.rightMouseUp,   .right)
+        case 5: (eventType, button) = (.otherMouseDown, .center)
+        default:(eventType, button) = (.otherMouseUp,   .center)  // case 6
         }
         
         if let event = CGEvent(mouseEventSource: nil, mouseType: eventType,
                                mouseCursorPosition: point, mouseButton: button) {
-            event.post(tap: .cghidEventTap)
+            event.post(tap: CGEventTapLocation.cghidEventTap)
         }
     }
     
@@ -81,8 +84,9 @@ class InputInjector: ObservableObject {
         if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
                                wheelCount: 2,
                                wheel1: Int32(deltaY / 120),
-                               wheel2: Int32(deltaX / 120)) {
-            event.post(tap: .cghidEventTap)
+                               wheel2: Int32(deltaX / 120),
+                               wheel3: 0) {
+            event.post(tap: CGEventTapLocation.cghidEventTap)
         }
     }
     

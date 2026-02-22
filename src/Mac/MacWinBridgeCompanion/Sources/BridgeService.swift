@@ -184,10 +184,9 @@ class BridgeService: ObservableObject {
                     let fps = json["Fps"] as? Int ?? 60
                     let bitrate = json["Bitrate"] as? Int ?? 20_000_000
                     
-                    let streamer = ScreenStreamer(
-                        width: width, height: height, fps: fps, bitrate: bitrate)
+                    screenStreamer.configure(width: width, height: height, fps: fps, bitrate: bitrate)
                     Task {
-                        await streamer.start(connection: conn)
+                        await self.screenStreamer.start(connection: conn)
                     }
                 } else {
                     screenStreamer.stop()
@@ -198,31 +197,31 @@ class BridgeService: ObservableObject {
             guard payload.count >= 8 else { return }
             let x = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
             let y = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
-            inputInjector.moveMouse(x: Int(x), y: Int(y))
+            inputInjector.injectMouseMove(x: Int(x), y: Int(y))
             kvmActive = true
             isFocusOnMac = true
             
         case .mouseButton:
             guard payload.count >= 4 else { return }
             let action = payload.withUnsafeBytes { $0.load(as: Int32.self) }
-            inputInjector.mouseButton(action: Int(action))
+            inputInjector.injectMouseButton(action: Int(action))
             
         case .mouseScroll:
             guard payload.count >= 8 else { return }
             let isHorizontal = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
             let delta = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
-            inputInjector.scroll(deltaX: isHorizontal != 0 ? Int(delta) : 0,
+            inputInjector.injectMouseScroll(deltaX: isHorizontal != 0 ? Int(delta) : 0,
                                deltaY: isHorizontal == 0 ? Int(delta) : 0)
             
         case .keyDown:
             guard payload.count >= 12 else { return }
             let vkCode = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
-            inputInjector.keyDown(vkCode: Int(vkCode))
+            inputInjector.injectKeyDown(vkCode: Int(vkCode))
             
         case .keyUp:
             guard payload.count >= 12 else { return }
             let vkCode = payload.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
-            inputInjector.keyUp(vkCode: Int(vkCode))
+            inputInjector.injectKeyUp(vkCode: Int(vkCode))
             
         case .cursorReturn:
             isFocusOnMac = false
